@@ -1,0 +1,27 @@
+{
+  "name": "dronetuner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first FPV drone fleet management and Betaflight PID tuning companion",
+  "license": "GPL-3.0-only",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"pnpm -C server dev\" \"pnpm -C client dev\"",
+    "dev:server": "pnpm -C server dev",
+    "dev:client": "pnpm -C client dev",
+    "build": "pnpm -C client build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "seed": "pnpm -C server seed",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.3"
+  }
+}

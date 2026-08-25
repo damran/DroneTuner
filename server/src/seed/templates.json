@@ -1,0 +1,134 @@
+[
+  {
+    "name": "65mm Racing",
+    "goal": "racing",
+    "sizeClass": "65mm",
+    "settings": {
+      "pids": { "roll": { "p": 50, "i": 90, "d": 42 }, "pitch": { "p": 52, "i": 90, "d": 42 }, "yaw": { "p": 85, "i": 100, "d": 0 } },
+      "filters": { "gyroLowpassDynMinHz": 250, "gyroLowpassDynMaxHz": 500, "dtermLowpassDynMinHz": 70, "dtermLowpassDynMaxHz": 190, "dynNotchCount": 3, "dynNotchMinHz": 150, "dynNotchMaxHz": 350 },
+      "rates": { "rcRate": 100, "rollRate": 75, "pitchRate": 75, "yawRate": 75, "rcExpo": 25, "thrMid": 50, "thrExpo": 0 },
+      "advanced": { "feedforwardRoll": 140, "feedforwardPitch": 140, "feedforwardYaw": 140, "feedforwardTransition": 0, "itermRelax": 2, "itermRelaxCutoff": 15, "dMinRoll": 30, "dMinPitch": 34, "tpaBreakpoint": 1350 }
+    }
+  },
+  {
+    "name": "65mm Freestyle",
+    "goal": "freestyle",
+    "sizeClass": "65mm",
+    "settings": {
+      "pids": { "roll": { "p": 46, "i": 90, "d": 40 }, "pitch": { "p": 48, "i": 90, "d": 40 }, "yaw": { "p": 80, "i": 100, "d": 0 } },
+      "filters": { "gyroLowpassDynMinHz": 250, "gyroLowpassDynMaxHz": 500, "dtermLowpassDynMinHz": 70, "dtermLowpassDynMaxHz": 170, "dynNotchCount": 3, "dynNotchMinHz": 150, "dynNotchMaxHz": 350 },
+      "rates": { "rcRate": 100, "rollRate": 70, "pitchRate": 70, "yawRate": 70, "rcExpo": 30, "thrMid": 50, "thrExpo": 0 },
+      "advanced": { "feedforwardRoll": 120, "feedforwardPitch": 120, "feedforwardYaw": 120, "feedforwardTransition": 0, "itermRelax": 2, "itermRelaxCutoff": 15, "dMinRoll": 30, "dMinPitch": 34, "tpaBreakpoint": 1350 }
+    }
+  },
+  {
+    "name": "65mm Cinematic",
+    "goal": "cinematic",
+    "sizeClass": "65mm",
+    "settings": {
+      "pids": { "roll": { "p": 42, "i": 90, "d": 38 }, "pitch": { "p": 44, "i": 90, "d": 38 }, "yaw": { "p": 75, "i": 100, "d": 0 } },
+      "filters": { "gyroLowpassDynMinHz": 220, "gyroLowpassDynMaxHz": 480, "dtermLowpassDynMinHz": 70, "dtermLowpassDynMaxHz": 200, "dynNotchCount": 3, "dynNotchMinHz": 150, "dynNotchMaxHz": 350 },
+      "rates": { "rcRate": 90, "rollRate": 65, "pitchRate": 65, "yawRate": 65, "rcExpo": 40, "thrMid": 50, "thrExpo": 0 },
+      "advanced": { "feedforwardRoll": 100, "feedforwardPitch": 100, "feedforwardYaw": 100, "feedforwardTransition": 0, "itermRelax": 2, "itermRelaxCutoff": 15, "dMinRoll": 30, "dMinPitch": 34, "tpaBreakpoint": 1350 }
+    }
+  },
+  {
+    "name": "65mm Efficiency",
+    "goal": "efficiency",
+    "sizeClass": "65mm",
+    "settings": {
+      "pids": { "roll": { "p": 44, "i": 90, "d": 36 }, "pitch": { "p": 46, "i": 90, "d": 36 }, "yaw": { "p": 78, "i": 100, "d": 0 } },
+      "filters": { "gyroLowpassDynMinHz": 250, "gyroLowpassDynMaxHz": 500, "dtermLowpassDynMinHz": 90, "dtermLowpassDynMaxHz": 220, "dynNotchCount": 2, "dynNotchMinHz": 150, "dynNotchMaxHz": 350 },
+      "rates": { "rcRate": 100, "rollRate": 70, "pitchRate": 70, "yawRate": 70, "rcExpo": 30, "thrMid": 50, "thrExpo": 0 },
+      "advanced": { "feedforwardRoll": 100, "feedforwardPitch": 100, "feedforwardYaw": 100, "feedforwardTransition": 0, "itermRelax": 2, "itermRelaxCutoff": 15, "dMinRoll": 30, "dMinPitch": 34, "tpaBreakpoint": 1350 }
+    }
+  },
+  {
+    "name": "65mm Low Noise",
+    "goal": "low_noise",
+    "sizeClass": "65mm",
+    "settings": {
+      "pids": { "roll": { "p": 40, "i": 90, "d": 36 }, "pitch": { "p": 42, "i": 90, "d": 36 }, "yaw": { "p": 70, "i": 100, "d": 0 } },
+      "filters": { "gyroLowpassDynMinHz": 180, "gyroLowpassDynMaxHz": 400, "dtermLowpassDynMinHz": 60, "dtermLowpassDynMaxHz": 160, "dynNotchCount": 3, "dynNotchMinHz": 150, "dynNotchMaxHz": 350 },
+      "rates": { "rcRate": 90, "rollRate": 65, "pitchRate": 65, "yawRate": 65, "rcExpo": 35, "thrMid": 50, "thrExpo": 0 },
+      "advanced": { "feedforwardRoll": 90, "feedforwardPitch": 90, "feedforwardYaw": 90, "feedforwardTransition": 0, "itermRelax": 2, "itermRelaxCutoff": 15, "dMinRoll": 30, "dMinPitch": 34, "tpaBreakpoint": 1350 }
+    }
+  },
+  {
+    "name": "65mm Low Latency",
+    "goal": "low_latency",
+    "sizeClass": "65mm",
+    "settings": {
+      "pids": { "roll": { "p": 54, "i": 90, "d": 44 }, "pitch": { "p": 56, "i": 90, "d": 44 }, "yaw": { "p": 90, "i": 100, "d": 0 } },
+      "filters": { "gyroLowpassDynMinHz": 300, "gyroLowpassDynMaxHz": 600, "dtermLowpassDynMinHz": 100, "dtermLowpassDynMaxHz": 250, "dynNotchCount": 1, "dynNotchMinHz": 200, "dynNotchMaxHz": 400 },
+      "rates": { "rcRate": 110, "rollRate": 80, "pitchRate": 80, "yawRate": 80, "rcExpo": 20, "thrMid": 50, "thrExpo": 0 },
+      "advanced": { "feedforwardRoll": 160, "feedforwardPitch": 160, "feedforwardYaw": 160, "feedforwardTransition": 0, "itermRelax": 2, "itermRelaxCutoff": 15, "dMinRoll": 30, "dMinPitch": 34, "tpaBreakpoint": 1350 }
+    }
+  },
+  {
+    "name": "2.5in Racing",
+    "goal": "racing",
+    "sizeClass": "2.5in",
+    "settings": {
+      "pids": { "roll": { "p": 56, "i": 95, "d": 37 }, "pitch": { "p": 60, "i": 95, "d": 37 }, "yaw": { "p": 90, "i": 100, "d": 0 } },
+      "filters": { "gyroLowpassDynMinHz": 200, "gyroLowpassDynMaxHz": 500, "dtermLowpassDynMinHz": 70, "dtermLowpassDynMaxHz": 190, "dynNotchCount": 3, "dynNotchMinHz": 100, "dynNotchMaxHz": 300 },
+      "rates": { "rcRate": 100, "rollRate": 75, "pitchRate": 75, "yawRate": 75, "rcExpo": 25, "thrMid": 50, "thrExpo": 0 },
+      "advanced": { "feedforwardRoll": 120, "feedforwardPitch": 120, "feedforwardYaw": 120, "feedforwardTransition": 0, "itermRelax": 2, "itermRelaxCutoff": 15, "dMinRoll": 30, "dMinPitch": 34, "tpaBreakpoint": 1350 }
+    }
+  },
+  {
+    "name": "2.5in Freestyle",
+    "goal": "freestyle",
+    "sizeClass": "2.5in",
+    "settings": {
+      "pids": { "roll": { "p": 52, "i": 95, "d": 35 }, "pitch": { "p": 56, "i": 95, "d": 35 }, "yaw": { "p": 85, "i": 100, "d": 0 } },
+      "filters": { "gyroLowpassDynMinHz": 200, "gyroLowpassDynMaxHz": 500, "dtermLowpassDynMinHz": 70, "dtermLowpassDynMaxHz": 170, "dynNotchCount": 3, "dynNotchMinHz": 100, "dynNotchMaxHz": 300 },
+      "rates": { "rcRate": 100, "rollRate": 70, "pitchRate": 70, "yawRate": 70, "rcExpo": 30, "thrMid": 50, "thrExpo": 0 },
+      "advanced": { "feedforwardRoll": 100, "feedforwardPitch": 100, "feedforwardYaw": 100, "feedforwardTransition": 0, "itermRelax": 2, "itermRelaxCutoff": 15, "dMinRoll": 30, "dMinPitch": 34, "tpaBreakpoint": 1350 }
+    }
+  },
+  {
+    "name": "2.5in Cinematic",
+    "goal": "cinematic",
+    "sizeClass": "2.5in",
+    "settings": {
+      "pids": { "roll": { "p": 48, "i": 95, "d": 33 }, "pitch": { "p": 52, "i": 95, "d": 33 }, "yaw": { "p": 80, "i": 100, "d": 0 } },
+      "filters": { "gyroLowpassDynMinHz": 180, "gyroLowpassDynMaxHz": 480, "dtermLowpassDynMinHz": 70, "dtermLowpassDynMaxHz": 200, "dynNotchCount": 3, "dynNotchMinHz": 100, "dynNotchMaxHz": 300 },
+      "rates": { "rcRate": 90, "rollRate": 65, "pitchRate": 65, "yawRate": 65, "rcExpo": 40, "thrMid": 50, "thrExpo": 0 },
+      "advanced": { "feedforwardRoll": 80, "feedforwardPitch": 80, "feedforwardYaw": 80, "feedforwardTransition": 0, "itermRelax": 2, "itermRelaxCutoff": 15, "dMinRoll": 30, "dMinPitch": 34, "tpaBreakpoint": 1350 }
+    }
+  },
+  {
+    "name": "2.5in Efficiency",
+    "goal": "efficiency",
+    "sizeClass": "2.5in",
+    "settings": {
+      "pids": { "roll": { "p": 50, "i": 95, "d": 32 }, "pitch": { "p": 54, "i": 95, "d": 32 }, "yaw": { "p": 82, "i": 100, "d": 0 } },
+      "filters": { "gyroLowpassDynMinHz": 200, "gyroLowpassDynMaxHz": 500, "dtermLowpassDynMinHz": 90, "dtermLowpassDynMaxHz": 220, "dynNotchCount": 2, "dynNotchMinHz": 100, "dynNotchMaxHz": 300 },
+      "rates": { "rcRate": 100, "rollRate": 70, "pitchRate": 70, "yawRate": 70, "rcExpo": 30, "thrMid": 50, "thrExpo": 0 },
+      "advanced": { "feedforwardRoll": 80, "feedforwardPitch": 80, "feedforwardYaw": 80, "feedforwardTransition": 0, "itermRelax": 2, "itermRelaxCutoff": 15, "dMinRoll": 30, "dMinPitch": 34, "tpaBreakpoint": 1350 }
+    }
+  },
+  {
+    "name": "2.5in Low Noise",
+    "goal": "low_noise",
+    "sizeClass": "2.5in",
+    "settings": {
+      "pids": { "roll": { "p": 46, "i": 95, "d": 31 }, "pitch": { "p": 50, "i": 95, "d": 31 }, "yaw": { "p": 75, "i": 100, "d": 0 } },
+      "filters": { "gyroLowpassDynMinHz": 160, "gyroLowpassDynMaxHz": 400, "dtermLowpassDynMinHz": 60, "dtermLowpassDynMaxHz": 160, "dynNotchCount": 3, "dynNotchMinHz": 100, "dynNotchMaxHz": 300 },
+      "rates": { "rcRate": 90, "rollRate": 65, "pitchRate": 65, "yawRate": 65, "rcExpo": 35, "thrMid": 50, "thrExpo": 0 },
+      "advanced": { "feedforwardRoll": 70, "feedforwardPitch": 70, "feedforwardYaw": 70, "feedforwardTransition": 0, "itermRelax": 2, "itermRelaxCutoff": 15, "dMinRoll": 30, "dMinPitch": 34, "tpaBreakpoint": 1350 }
+    }
+  },
+  {
+    "name": "2.5in Low Latency",
+    "goal": "low_latency",
+    "sizeClass": "2.5in",
+    "settings": {
+      "pids": { "roll": { "p": 60, "i": 95, "d": 39 }, "pitch": { "p": 64, "i": 95, "d": 39 }, "yaw": { "p": 95, "i": 100, "d": 0 } },
+      "filters": { "gyroLowpassDynMinHz": 250, "gyroLowpassDynMaxHz": 600, "dtermLowpassDynMinHz": 100, "dtermLowpassDynMaxHz": 250, "dynNotchCount": 1, "dynNotchMinHz": 150, "dynNotchMaxHz": 350 },
+      "rates": { "rcRate": 110, "rollRate": 80, "pitchRate": 80, "yawRate": 80, "rcExpo": 20, "thrMid": 50, "thrExpo": 0 },
+      "advanced": { "feedforwardRoll": 140, "feedforwardPitch": 140, "feedforwardYaw": 140, "feedforwardTransition": 0, "itermRelax": 2, "itermRelaxCutoff": 15, "dMinRoll": 30, "dMinPitch": 34, "tpaBreakpoint": 1350 }
+    }
+  }
+]

@@ -1,6 +1,7 @@
 import type { ParsedLog } from "../blackbox/types";
 import { AXES, type Axis } from "../types/fc";
 import { median } from "./fft";
+import { airborneMask } from "./spectrogram";
 
 /**
  * Rates usage extraction: how the pilot actually uses the stick range, built
@@ -192,9 +193,6 @@ export function computeRatesUsage(log: ParsedLog): RatesUsage | null {
   const gyros = AXES.map((axis) => log.channels[`gyroADC[${AXIS_INDEX[axis]}]`]);
   const hasGyro = gyros.every((c) => c && c.length > 0) && gyroScale !== null;
 
-  const rcThrottle = log.channels["rcCommand[3]"];
-  const spThrottle = log.channels["setpoint[3]"];
-
   const loggedRates = parseLoggedRates(log.headers);
 
   const n = Math.min(sp[0]!.length, sp[1]!.length, sp[2]!.length);
@@ -207,15 +205,13 @@ export function computeRatesUsage(log: ParsedLog): RatesUsage | null {
   const trackingRatios: number[][] = [[], [], []];
   const loggedMax = AXES.map((axis) => loggedRates?.[axis].max ?? BF_DEFAULT_RATES.max);
 
+  // Shared airborne filter (throttle above idle, or any axis actively
+  // commanded) — drops disarmed/idle time that would swamp the precision bin.
+  const airborneMaskArr = airborneMask(log);
+
   let airborne = 0;
   for (let i = 0; i < n; i++) {
-    // Airborne filter: throttle above idle, or any axis actively commanded.
-    // Drops disarmed/idle time which would otherwise swamp the precision bin.
-    const thrHigh =
-      (rcThrottle && i < rcThrottle.length && rcThrottle[i]! > 1050) ||
-      (spThrottle && i < spThrottle.length && spThrottle[i]! > 50);
-    const moving = Math.abs(sp[0]![i]!) > 20 || Math.abs(sp[1]![i]!) > 20 || Math.abs(sp[2]![i]!) > 20;
-    if (!thrHigh && !moving) continue;
+    if (airborneMaskArr && (i >= airborneMaskArr.length || !airborneMaskArr[i])) continue;
     airborne++;
 
     for (let a = 0; a < 3; a++) {

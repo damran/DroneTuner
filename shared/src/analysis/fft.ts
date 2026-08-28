@@ -82,6 +82,11 @@ export interface SpectrumOptions {
   offset?: number;
   /** number of samples to use (defaults to remaining length, truncated to pow2) */
   length?: number;
+  /**
+   * Precomputed window + its mean gain (e.g. from `hannWindow` once for many
+   * same-size spectra). Overrides `window` when provided.
+   */
+  precomputedWindow?: { win: Float64Array; winGain: number };
 }
 
 /** One-sided amplitude spectrum of a real signal. */
@@ -108,9 +113,16 @@ export function amplitudeSpectrum(
     mean /= n;
   }
 
-  const win = window ? hannWindow(n) : null;
-  // coherent gain correction so amplitudes stay comparable
-  const winGain = win ? win.reduce((a, b) => a + b, 0) / n : 1;
+  let win: Float64Array | null = null;
+  let winGain = 1;
+  if (options.precomputedWindow && options.precomputedWindow.win.length === n) {
+    win = options.precomputedWindow.win;
+    winGain = options.precomputedWindow.winGain;
+  } else if (window) {
+    win = hannWindow(n);
+    // coherent gain correction so amplitudes stay comparable
+    winGain = win.reduce((a, b) => a + b, 0) / n;
+  }
 
   for (let i = 0; i < n; i++) {
     re[i] = (samples[offset + i]! - mean) * (win ? win[i]! : 1);

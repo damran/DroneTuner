@@ -138,6 +138,27 @@ export function hexToFloat(s: string): number {
   return value * Math.pow(2, exp);
 }
 
+/**
+ * Parse the blackbox `gyro_scale` header. BF logs it in one of three formats:
+ * C99 hex float ("0x1.000000p+0"), plain decimal float, or the raw IEEE-754
+ * bits as a hex/decimal integer ("0x3f800000" / "1065353216" for 1.0).
+ */
+export function parseGyroScale(s: string): number {
+  const v = hexToFloat(s);
+  // Sane gyro scales are small (deg/s per raw unit, typically 0.001–2).
+  if (v > 0.0001 && v < 100) return v;
+  const bits = s.trim().toLowerCase().startsWith("0x")
+    ? Number.parseInt(s.trim(), 16)
+    : Number.parseInt(s.trim(), 10);
+  if (Number.isFinite(bits)) {
+    const buf = new DataView(new ArrayBuffer(4));
+    buf.setUint32(0, bits >>> 0, false);
+    const f = buf.getFloat32(0, false);
+    if (f > 0.0001 && f < 100) return f;
+  }
+  return v;
+}
+
 export function parseCommaSeparatedString(str: string): number[] {
   return str.split(",").map((part) => Number.parseInt(part.trim(), 10));
 }

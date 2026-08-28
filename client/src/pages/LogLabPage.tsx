@@ -4,7 +4,14 @@ import { useSearchParams } from "react-router-dom";
 import { FileUp, Loader2 } from "lucide-react";
 import type { Analysis, DroneSummary, Flight, FlightLog } from "@dronetuner/shared";
 import { parseBlackboxLog } from "@dronetuner/shared/blackbox";
-import { amplitudeSpectrum, averageStepResponse, detectSteps, findPeaks } from "@dronetuner/shared/analysis";
+import {
+  amplitudeSpectrum,
+  averageStepResponse,
+  compareAnalyses,
+  detectSteps,
+  findPeaks,
+  type AnalysisComparison,
+} from "@dronetuner/shared/analysis";
 import type { ParsedLog } from "@dronetuner/shared/blackbox";
 import { apiGet, apiPost } from "@/lib/api";
 import { formatDate, formatDuration, formatPercent, formatVolts } from "@/lib/format";
@@ -77,6 +84,28 @@ export default function LogLabPage() {
 
   const drone = drones?.find((d) => String(d.id) === droneId);
   const flightForLog = flights?.find((f) => f.logId === selectedLog);
+
+  // Previous log of the same drone (logs arrive newest-first) for the
+  // "current vs last blackbox" comparison.
+  const selectedLogEntry = logs?.find((l) => l.id === selectedLog) ?? null;
+  const previousLog = useMemo(() => {
+    if (!logs || selectedLog === null) return null;
+    const idx = logs.findIndex((l) => l.id === selectedLog);
+    return idx >= 0 && idx + 1 < logs.length ? logs[idx + 1]! : null;
+  }, [logs, selectedLog]);
+  const prevAnalysisQuery = useQuery({
+    queryKey: ["analysis", previousLog?.id],
+    enabled: !!previousLog && !!analysisQuery.data,
+    queryFn: () => apiGet<Analysis>(`/api/logs/${previousLog!.id}/analysis`),
+    retry: false,
+  });
+  const comparison: AnalysisComparison | null = useMemo(() => {
+    if (!analysisQuery.data || !prevAnalysisQuery.data || !selectedLogEntry || !previousLog) return null;
+    return compareAnalyses(
+      { metrics: analysisQuery.data.metrics, headers: selectedLogEntry.headers ?? {} },
+      { metrics: prevAnalysisQuery.data.metrics, headers: previousLog.headers ?? {} },
+    );
+  }, [analysisQuery.data, prevAnalysisQuery.data, selectedLogEntry, previousLog]);
 
   const upload = useMutation({
     mutationFn: async (file: File) => {
@@ -219,6 +248,8 @@ export default function LogLabPage() {
                 {analysisQuery.data && (
                   <div className="space-y-4">
                     <MetricsCards analysis={analysisQuery.data} />
+                    <FilterDelayCard analysis={analysisQuery.data} />
+                    <NoiseSourcesCard analysis={analysisQuery.data} />
                     <FindingsPanel findings={analysisQuery.data.findings} />
                   </div>
                 )}
@@ -243,6 +274,10 @@ export default function LogLabPage() {
             </Card>
           )}
 
+          {comparison && previousLog && (
+            <ComparisonCard comparison={comparison} previousLog={previousLog} />
+          )}
+
           {parsed && <TracesView parsed={parsed} />}
         </div>
       </div>
@@ -258,7 +293,12 @@ function MetricsCards({ analysis }: { analysis: Analysis }) {
     { label: "Motor saturation", value: formatPercent(m.motorSaturationPercent) },
     { label: "Battery min", value: formatVolts(m.vbatMinV) },
     { label: "Battery sag", value: formatVolts(m.vbatSagV) },
-    { label: "Filter latency (est.)", value: m.filterLatencyMs != null ? `${m.filterLatencyMs} ms` : "—" },
+    {
+      label: "Filter delay (D path)",
+      value: m.filterDelay
+        ? `${m.filterDelay.dtermMs.toFixed(1)}–${m.filterDelay.dtermMsMax.toFixed(1)} ms`
+        : "—",
+    },
     { label: "RPM filter", value: m.rpmFilterActive ? "Active" : "—" },
   ];
   return (
@@ -361,6 +401,174 @@ function TracesView({ parsed }: { parsed: ParsedLog }) {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+/** Per-stage group-delay breakdown of the filter chain flown in this log. */
+function FilterDelayCard({ analysis }: { analysis: Analysis }) {
+  const d = analysis.metrics.filterDelay;
+  if (!d) {
+    return (
+      <Card>
+        <CardContent className="p-4 text-sm text-muted-foreground">
+          Filter delay: this analysis predates the delay estimator — click Re-analyze to compute it.
+        </CardContent>
+      </Card>
+    );
+  }
+  return (
+    <Card>
+      <CardHeader className="p-4">
+        <CardTitle className="text-sm">
+          Filter delay @ {d.referenceFreqHz} Hz — gyro {d.gyroMs.toFixed(1)}–{d.gyroMsMax.toFixed(1)} ms, D path{" "}
+          {d.dtermMs.toFixed(1)}–{d.dtermMsMax.toFixed(1)} ms
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="p-4 pt-0">
+        <p className="mb-2 text-xs text-muted-foreground">
+          Group delay of the filter chain from this log&apos;s config (ranges span 0–100% throttle for dynamic
+          lowpasses). Lower = snappier; well-tuned builds land around 3–5 ms on the D path.
+        </p>
+        <div className="space-y-1">
+          {d.stages.map((s) => (
+            <div key={s.name} className="flex items-center justify-between text-sm">
+              <span>{s.name}</span>
+              <span className="text-muted-foreground">{s.ms.toFixed(2)} ms</span>
+            </div>
+          ))}
+        </div>
+        {d.warnings.length > 0 && (
+          <p className="mt-2 text-xs text-muted-foreground">{d.warnings.join(" ")}</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Classified noise sources: frame resonances (dyn notch) vs motor harmonics (RPM filter). */
+function NoiseSourcesCard({ analysis }: { analysis: Analysis }) {
+  const spectral = analysis.metrics.spectral;
+  if (!spectral) return null;
+  const rows = spectral.flatMap((s) =>
+    s.peaks.map((p) => ({ axis: s.axis, ...p })),
+  );
+  const onsets = spectral.map((s) => s.motorNoiseOnsetHz).filter((v): v is number => v !== null);
+  if (rows.length === 0 && onsets.length === 0) {
+    return (
+      <Card>
+        <CardContent className="p-4 text-sm text-muted-foreground">
+          No significant noise sources classified — clean log.
+        </CardContent>
+      </Card>
+    );
+  }
+  return (
+    <Card>
+      <CardHeader className="p-4">
+        <CardTitle className="text-sm">Noise sources (frequency vs throttle)</CardTitle>
+      </CardHeader>
+      <CardContent className="p-4 pt-0">
+        <div className="space-y-1">
+          {rows.map((p, i) => (
+            <div key={i} className="flex items-center justify-between gap-2 text-sm">
+              <span className="capitalize">{p.axis}</span>
+              <span>{Math.round(p.freqHz)} Hz</span>
+              <span className="text-muted-foreground">{p.ratioToFloor.toFixed(1)}× floor</span>
+              <span
+                className={
+                  p.kind === "frameResonance"
+                    ? "text-amber-500"
+                    : p.kind === "motorHarmonic"
+                      ? "text-sky-400"
+                      : "text-muted-foreground"
+                }
+              >
+                {p.kind === "frameResonance" ? "frame resonance → dyn notch" : p.kind === "motorHarmonic" ? "motor harmonic → RPM filter" : "unclassified"}
+              </span>
+            </div>
+          ))}
+        </div>
+        {onsets.length > 0 && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Motor noise onset ≈ {Math.round(Math.min(...onsets))} Hz — RPM filters should be at full strength
+            just above this.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Current vs previous blackbox: settings that changed + resulting metric movement. */
+function ComparisonCard({
+  comparison,
+  previousLog,
+}: {
+  comparison: AnalysisComparison;
+  previousLog: FlightLog;
+}) {
+  return (
+    <Card>
+      <CardHeader className="p-4">
+        <CardTitle className="text-sm">vs previous log ({formatDate(previousLog.uploadedAt)})</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4 p-4 pt-0">
+        {comparison.settingChanges.length > 0 && (
+          <div>
+            <div className="mb-1 text-xs font-medium text-muted-foreground">Settings changed</div>
+            <div className="space-y-1">
+              {comparison.settingChanges.map((c) => (
+                <div key={c.key} className="flex items-center justify-between gap-2 text-sm">
+                  <span className="font-mono text-xs">{c.key}</span>
+                  <span>
+                    {c.from} → <span className="font-medium">{c.to}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+            {comparison.otherChangesCount > 0 && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                + {comparison.otherChangesCount} other setting(s) changed
+              </p>
+            )}
+          </div>
+        )}
+        {comparison.metricDeltas.length > 0 && (
+          <div>
+            <div className="mb-1 text-xs font-medium text-muted-foreground">Results</div>
+            <div className="space-y-1">
+              {comparison.metricDeltas.map((d) => (
+                <div key={d.label} className="flex items-center justify-between gap-2 text-sm">
+                  <span className="capitalize">{d.label}</span>
+                  <span>
+                    {d.from} → {d.to}{" "}
+                    <span
+                      className={
+                        d.verdict === "better"
+                          ? "text-emerald-500"
+                          : d.verdict === "worse"
+                            ? "text-red-500"
+                            : "text-muted-foreground"
+                      }
+                    >
+                      {d.verdict === "better" ? "▲ better" : d.verdict === "worse" ? "▼ worse" : "•"}
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {comparison.settingChanges.length === 0 && comparison.metricDeltas.length === 0 && (
+          <p className="text-sm text-muted-foreground">No comparable changes between these two logs.</p>
+        )}
+        {comparison.warnings.map((w) => (
+          <p key={w} className="text-xs text-muted-foreground">
+            {w}
+          </p>
+        ))}
+      </CardContent>
+    </Card>
   );
 }
 

@@ -22,14 +22,35 @@ export interface FilterSettings {
   gyroLowpassDynMinHz?: number;
   gyroLowpassDynMaxHz?: number;
   gyroLowpassType?: number; // BF filter type enum index (PT1/BIQUAD/PT2/PT3)
+  /** Gyro LPF2 — primarily an anti-aliasing filter (BF default 500 Hz PT1). */
+  gyroLowpass2Hz?: number;
+  gyroLowpass2Type?: number;
+  /** Gyro lowpass applied to the yaw axis only (0 = disabled). */
+  yawLowpassHz?: number;
   dtermLowpassHz?: number;
   dtermLowpassDynMinHz?: number;
   dtermLowpassDynMaxHz?: number;
   dtermLowpassType?: number;
+  dtermLowpass2Hz?: number;
+  dtermLowpass2Type?: number;
   dynNotchCount?: number;
   dynNotchMinHz?: number;
   dynNotchMaxHz?: number;
   dynNotchQ?: number;
+  /** How fast dynamic LPF cutoffs rise with throttle (BF default 5). */
+  dynLpfCurveExpo?: number;
+  rpmFilterHarmonics?: number;
+  rpmFilterMinHz?: number;
+  /**
+   * CLI-only on BF 4.4/4.5 (MSP carries them only from API 1.48): fade range,
+   * Q and per-harmonic weights of the RPM filter bank. Weights are stored as
+   * three numeric leaves so applyChanges/diff stay scalar.
+   */
+  rpmFilterFadeRangeHz?: number;
+  rpmFilterQ?: number;
+  rpmFilterWeight1?: number;
+  rpmFilterWeight2?: number;
+  rpmFilterWeight3?: number;
 }
 
 /** RC tuning fields the tuning system understands (subset of MSP_RC_TUNING). */
@@ -56,15 +77,25 @@ export interface AdvancedSettings {
   feedforwardAveraging?: number;
   feedforwardSmoothFactor?: number;
   feedforwardBoost?: number;
+  feedforwardMaxRateLimit?: number;
+  feedforwardJitterFactor?: number;
   itermRelax?: number;
   itermRelaxCutoff?: number;
   /** BF "d_min" values — the D floor at full throttle (Configurator "D Min"). */
   dMinRoll?: number;
   dMinPitch?: number;
+  /** Dynamic damping (d_min) boost gain and advance — MSP dMaxGain/dMaxAdvance. */
+  dMaxGain?: number;
+  dMaxAdvance?: number;
   thrustLinear?: number;
   antiGravityGain?: number;
+  tpaMode?: number; // 0 = D only, 1 = P+D
   tpaRate?: number;
   tpaBreakpoint?: number;
+  vbatSagCompensation?: number;
+  /** Dynamic idle minimum RPM in RPM/100 (0–200; MSP u8 and BF 4.5 CLI
+   *  `dyn_idle_min_rpm` share this scale). */
+  idleMinRpm?: number;
 }
 
 export interface PidAxisSettings {

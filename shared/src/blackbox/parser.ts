@@ -4,7 +4,7 @@
  * parsing, I/P/S/E/G/H frames, all standard field encodings and predictors.
  */
 
-import { ByteStream, EOF, hexToFloat, parseCommaSeparatedString } from "./stream";
+import { ByteStream, EOF, hexToFloat, parseCommaSeparatedString, parseGyroScale } from "./stream";
 import {
   readTag2_3S32,
   readTag2_3SVariable,
@@ -279,7 +279,7 @@ export class BlackboxParser {
     if (!Number.isNaN(vbatref)) this.vbatref = vbatref;
 
     const gyroScaleStr = h["gyro.scale"] ?? h["gyro_scale"];
-    if (gyroScaleStr) this.gyroScale = hexToFloat(gyroScaleStr);
+    if (gyroScaleStr) this.gyroScale = parseGyroScale(gyroScaleStr);
 
     const looptime = h["looptime"] ? Number.parseInt(h["looptime"], 10) : NaN;
     if (!Number.isNaN(looptime)) this.looptimeUs = looptime;

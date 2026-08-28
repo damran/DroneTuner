@@ -41,20 +41,52 @@ const PID_KEYS: Record<string, readonly ["roll" | "pitch" | "yaw", "p" | "i" | "
   d_yaw: ["yaw", "d"],
 };
 
-/** key → [settings field, enum map?] */
+/**
+ * key → [settings field, enum map?]. BF renamed the gyro/D-term LPF settings
+ * in 4.5 (`gyro_lowpass_hz` → `gyro_lpf1_static_hz`, `gyro_lowpass_dyn_min_hz`
+ * → `gyro_lpf1_dyn_min_hz`, `dyn_lpf_curve_expo` → per-filter
+ * `dterm_lpf1_dyn_expo`, …) — both generations are accepted so vendor dumps
+ * from 4.3/4.4 and 4.5+ all parse.
+ */
 const FILTER_KEYS: Record<string, { field: string; enum?: Record<string, number> }> = {
+  // BF 4.5+ canonical names
+  gyro_lpf1_static_hz: { field: "gyroLowpassHz" },
+  gyro_lpf1_type: { field: "gyroLowpassType", enum: FILTER_TYPE_ENUM },
+  gyro_lpf1_dyn_min_hz: { field: "gyroLowpassDynMinHz" },
+  gyro_lpf1_dyn_max_hz: { field: "gyroLowpassDynMaxHz" },
+  gyro_lpf2_static_hz: { field: "gyroLowpass2Hz" },
+  gyro_lpf2_type: { field: "gyroLowpass2Type", enum: FILTER_TYPE_ENUM },
+  dterm_lpf1_static_hz: { field: "dtermLowpassHz" },
+  dterm_lpf1_type: { field: "dtermLowpassType", enum: FILTER_TYPE_ENUM },
+  dterm_lpf1_dyn_min_hz: { field: "dtermLowpassDynMinHz" },
+  dterm_lpf1_dyn_max_hz: { field: "dtermLowpassDynMaxHz" },
+  dterm_lpf1_dyn_expo: { field: "dynLpfCurveExpo" },
+  dterm_lpf2_static_hz: { field: "dtermLowpass2Hz" },
+  dterm_lpf2_type: { field: "dtermLowpass2Type", enum: FILTER_TYPE_ENUM },
+  // BF ≤4.4 names (legacy dumps)
   gyro_lowpass_hz: { field: "gyroLowpassHz" },
   gyro_lowpass_dyn_min_hz: { field: "gyroLowpassDynMinHz" },
   gyro_lowpass_dyn_max_hz: { field: "gyroLowpassDynMaxHz" },
   gyro_lowpass_type: { field: "gyroLowpassType", enum: FILTER_TYPE_ENUM },
+  gyro_lowpass2_hz: { field: "gyroLowpass2Hz" },
+  gyro_lowpass2_type: { field: "gyroLowpass2Type", enum: FILTER_TYPE_ENUM },
   dterm_lowpass_hz: { field: "dtermLowpassHz" },
   dterm_lowpass_dyn_min_hz: { field: "dtermLowpassDynMinHz" },
   dterm_lowpass_dyn_max_hz: { field: "dtermLowpassDynMaxHz" },
   dterm_lowpass_type: { field: "dtermLowpassType", enum: FILTER_TYPE_ENUM },
+  dterm_lowpass2_hz: { field: "dtermLowpass2Hz" },
+  dterm_lowpass2_type: { field: "dtermLowpass2Type", enum: FILTER_TYPE_ENUM },
+  dyn_lpf_curve_expo: { field: "dynLpfCurveExpo" },
+  // unchanged across versions
+  yaw_lowpass_hz: { field: "yawLowpassHz" },
   dyn_notch_count: { field: "dynNotchCount" },
   dyn_notch_min_hz: { field: "dynNotchMinHz" },
   dyn_notch_max_hz: { field: "dynNotchMaxHz" },
   dyn_notch_q: { field: "dynNotchQ" },
+  rpm_filter_harmonics: { field: "rpmFilterHarmonics" },
+  rpm_filter_min_hz: { field: "rpmFilterMinHz" },
+  rpm_filter_fade_range_hz: { field: "rpmFilterFadeRangeHz" },
+  rpm_filter_q: { field: "rpmFilterQ" },
 };
 
 /**
@@ -87,6 +119,11 @@ const RATE_KEYS: Record<string, string> = {
 };
 
 const ADVANCED_KEYS: Record<string, { field: string; enum?: Record<string, number> }> = {
+  // BF 4.5+ per-axis feedforward gains
+  f_roll: { field: "feedforwardRoll" },
+  f_pitch: { field: "feedforwardPitch" },
+  f_yaw: { field: "feedforwardYaw" },
+  // BF ≤4.4 names
   feedforward_roll: { field: "feedforwardRoll" },
   feedforward_pitch: { field: "feedforwardPitch" },
   feedforward_yaw: { field: "feedforwardYaw" },
@@ -94,14 +131,21 @@ const ADVANCED_KEYS: Record<string, { field: string; enum?: Record<string, numbe
   feedforward_averaging: { field: "feedforwardAveraging", enum: FF_AVERAGING_ENUM },
   feedforward_smooth_factor: { field: "feedforwardSmoothFactor" },
   feedforward_boost: { field: "feedforwardBoost" },
+  feedforward_max_rate_limit: { field: "feedforwardMaxRateLimit" },
+  feedforward_jitter_factor: { field: "feedforwardJitterFactor" },
   iterm_relax: { field: "itermRelax", enum: ITERM_RELAX_ENUM },
   iterm_relax_cutoff: { field: "itermRelaxCutoff" },
   d_min_roll: { field: "dMinRoll" },
   d_min_pitch: { field: "dMinPitch" },
+  d_max_gain: { field: "dMaxGain" },
+  d_max_advance: { field: "dMaxAdvance" },
   thrust_linear: { field: "thrustLinear" },
   anti_gravity_gain: { field: "antiGravityGain" },
+  tpa_mode: { field: "tpaMode", enum: { PD: 1, D: 0 } },
   tpa_rate: { field: "tpaRate" },
   tpa_breakpoint: { field: "tpaBreakpoint" },
+  vbat_sag_compensation: { field: "vbatSagCompensation" },
+  dyn_idle_min_rpm: { field: "idleMinRpm" },
 };
 
 function parseScaled(raw: string): number | null {
@@ -165,10 +209,31 @@ export function parseCliDump(input: string): CliDumpParseResult {
       continue;
     }
 
+    // rpm_filter_weights is a CLI array ("100,100,100") — split into the
+    // three scalar leaves the settings model uses.
+    if (key === "rpm_filter_weights") {
+      const parts = raw.split(",").map((s) => parseInt(s));
+      if (parts.length === 3 && parts.every((v): v is number => v !== null)) {
+        settings.filters = {
+          ...settings.filters,
+          rpmFilterWeight1: parts[0]!,
+          rpmFilterWeight2: parts[1]!,
+          rpmFilterWeight3: parts[2]!,
+        };
+        recognized.push(key);
+      } else {
+        ignored.push(key);
+      }
+      continue;
+    }
+
     const pid = PID_KEYS[key];
     if (pid) {
       const v = parseInt(raw);
-      if (v === null) break;
+      if (v === null) {
+        ignored.push(key);
+        continue;
+      }
       const [axis, term] = pid;
       settings.pids ??= {};
       settings.pids[axis] = { ...settings.pids[axis], [term]: v };

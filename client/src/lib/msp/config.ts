@@ -26,17 +26,27 @@ export interface FieldDef {
  */
 export const FILTER_FIELDS: Record<string, FieldDef> = {
   dtermLowpassHz: { offset: 1, size: 2 },
+  yawLowpassHz: { offset: 3, size: 2 },
   dtermLowpassType: { offset: 17, size: 1 },
   gyroLowpassHz: { offset: 20, size: 2 },
+  gyroLowpass2Hz: { offset: 22, size: 2 },
   gyroLowpassType: { offset: 24, size: 1 },
+  gyroLowpass2Type: { offset: 25, size: 1 },
+  dtermLowpass2Hz: { offset: 26, size: 2 },
+  dtermLowpass2Type: { offset: 28, size: 1 },
   gyroLowpassDynMinHz: { offset: 29, size: 2 },
   gyroLowpassDynMaxHz: { offset: 31, size: 2 },
   dtermLowpassDynMinHz: { offset: 33, size: 2 },
   dtermLowpassDynMaxHz: { offset: 35, size: 2 },
   dynNotchQ: { offset: 39, size: 2 },
   dynNotchMinHz: { offset: 41, size: 2 },
+  rpmFilterHarmonics: { offset: 43, size: 1 },
+  rpmFilterMinHz: { offset: 44, size: 1 },
   dynNotchMaxHz: { offset: 45, size: 2 },
+  dynLpfCurveExpo: { offset: 47, size: 1 },
   dynNotchCount: { offset: 48, size: 1 },
+  // rpm_filter fade/Q/weights exist on the wire only from API 1.48 — on
+  // 4.4/4.5 (writes are gated to 1.45/1.46) they are CLI-snippet-only.
 };
 
 export const RATE_FIELDS: Record<string, FieldDef> = {
@@ -62,11 +72,18 @@ export const ADVANCED_FIELDS: Record<string, FieldDef> = {
   feedforwardYaw: { offset: 36, size: 2 },
   dMinRoll: { offset: 39, size: 1 },
   dMinPitch: { offset: 40, size: 1 },
+  dMaxGain: { offset: 42, size: 1 },
+  dMaxAdvance: { offset: 43, size: 1 },
   itermRelaxCutoff: { offset: 46, size: 1 },
+  idleMinRpm: { offset: 49, size: 1 },
   feedforwardAveraging: { offset: 50, size: 1 },
   feedforwardSmoothFactor: { offset: 51, size: 1 },
   feedforwardBoost: { offset: 52, size: 1 },
+  feedforwardMaxRateLimit: { offset: 53, size: 1 },
+  feedforwardJitterFactor: { offset: 54, size: 1 },
+  vbatSagCompensation: { offset: 55, size: 1 },
   thrustLinear: { offset: 56, size: 1 },
+  tpaMode: { offset: 57, size: 1 },
   tpaRate: { offset: 58, size: 1 },
   tpaBreakpoint: { offset: 59, size: 2 },
 };
@@ -215,11 +232,14 @@ export function patchPayload(
   for (const [key, v] of Object.entries(values)) {
     const f = fields[key];
     if (!f || f.offset + f.size > out.length) continue;
+    // Clamp to the field width — never let an out-of-range value wrap around.
+    const max = f.size === 1 ? 0xff : 0xffff;
+    const clamped = Math.max(0, Math.min(max, Math.round(v)));
     if (f.size === 1) {
-      out[f.offset] = v & 0xff;
+      out[f.offset] = clamped;
     } else {
-      out[f.offset] = v & 0xff;
-      out[f.offset + 1] = (v >> 8) & 0xff;
+      out[f.offset] = clamped & 0xff;
+      out[f.offset + 1] = (clamped >> 8) & 0xff;
     }
   }
   return out;

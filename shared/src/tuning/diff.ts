@@ -18,14 +18,27 @@ const FILTER_LABELS: Record<string, string> = {
   gyroLowpassDynMinHz: "Gyro dyn LPF min",
   gyroLowpassDynMaxHz: "Gyro dyn LPF max",
   gyroLowpassType: "Gyro LPF type",
+  gyroLowpass2Hz: "Gyro LPF2",
+  gyroLowpass2Type: "Gyro LPF2 type",
+  yawLowpassHz: "Yaw LPF",
   dtermLowpassHz: "D-term LPF",
   dtermLowpassDynMinHz: "D-term dyn LPF min",
   dtermLowpassDynMaxHz: "D-term dyn LPF max",
   dtermLowpassType: "D-term LPF type",
+  dtermLowpass2Hz: "D-term LPF2",
+  dtermLowpass2Type: "D-term LPF2 type",
   dynNotchCount: "Dyn notch count",
   dynNotchMinHz: "Dyn notch min",
   dynNotchMaxHz: "Dyn notch max",
   dynNotchQ: "Dyn notch Q",
+  dynLpfCurveExpo: "Dyn LPF curve expo",
+  rpmFilterHarmonics: "RPM filter harmonics",
+  rpmFilterMinHz: "RPM filter min Hz",
+  rpmFilterFadeRangeHz: "RPM filter fade range",
+  rpmFilterQ: "RPM filter Q",
+  rpmFilterWeight1: "RPM filter weight (1st harmonic)",
+  rpmFilterWeight2: "RPM filter weight (2nd harmonic)",
+  rpmFilterWeight3: "RPM filter weight (3rd harmonic)",
 };
 
 const RATE_LABELS: Record<string, string> = {
@@ -50,14 +63,21 @@ const ADVANCED_LABELS: Record<string, string> = {
   feedforwardAveraging: "FF averaging",
   feedforwardSmoothFactor: "FF smooth factor",
   feedforwardBoost: "FF boost",
+  feedforwardMaxRateLimit: "FF max rate limit",
+  feedforwardJitterFactor: "FF jitter factor",
   itermRelax: "I-term relax",
   itermRelaxCutoff: "I-term relax cutoff",
   dMinRoll: "D Min roll",
   dMinPitch: "D Min pitch",
+  dMaxGain: "Dynamic damping gain",
+  dMaxAdvance: "Dynamic damping advance",
   thrustLinear: "Thrust linear",
   antiGravityGain: "Anti-gravity gain",
+  tpaMode: "TPA mode",
   tpaRate: "TPA rate",
   tpaBreakpoint: "TPA breakpoint",
+  vbatSagCompensation: "VBAT sag compensation",
+  idleMinRpm: "Dynamic idle min RPM",
 };
 
 function formatValue(path: string, v: number): string {
@@ -83,14 +103,14 @@ export function diffConfig(current: FcConfig, target: ProfileSettings): DiffResu
     to: number | undefined,
   ): void => {
     if (to === undefined) return;
-    const f = from ?? 0;
-    if (f === to) return;
+    if (from === to) return;
+    // Never fabricate a baseline: keys the FC read didn't decode show "?".
     diff.push({
       path,
       label,
-      from: f,
+      from: from ?? null,
       to,
-      fromDisplay: formatValue(path, f),
+      fromDisplay: from === undefined ? "?" : formatValue(path, from),
       toDisplay: formatValue(path, to),
     });
     touched.add(section);

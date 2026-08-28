@@ -1,48 +1,157 @@
 import type { AxisStepMetrics } from "./types";
 
 export interface StepWindow {
+  /** index of the first sample of the setpoint edge */
   start: number;
+  /** end of the response window (capped at the next edge or windowMs) */
   end: number;
+  /** signed setpoint change (deg/s) from pre-level to plateau */
   amplitude: number;
+  /** setpoint value during the post-step plateau (deg/s) */
+  plateau: number;
+  /** index where the plateau hold starts */
+  plateauStart: number;
+  /** index where the plateau hold ends (next edge or window cap) */
+  plateauEnd: number;
+}
+
+export interface DetectStepsOptions {
+  /** minimum |setpoint change| to count as a step (deg/s, default 150) */
+  minAmplitude?: number;
+  /** required plateau hold after the edge (ms, default 50) */
+  minHoldMs?: number;
+  /** required quiet time before the edge (ms, default 30) — the step must
+   *  start from a steady state so the response is attributable */
+  preQuietMs?: number;
+  /** response window cap (ms, default 300) */
+  windowMs?: number;
+  /**
+   * Edge threshold on the setpoint derivative (deg/s², default 4000). A sharp
+   * stick move ramps the setpoint over a few ms even with RC smoothing, so a
+   * derivative threshold catches smoothed steps that a per-sample jump
+   * threshold would miss.
+   */
+  edgeThresholdDegS2?: number;
 }
 
 /**
- * Detect stick steps in a setpoint trace (deg/s). Returns windows around each
- * rising/falling step, sorted by start index.
+ * Detect stick steps in a setpoint trace (deg/s), PTB/fpvpidlab style:
+ * flag samples where the setpoint derivative exceeds a threshold, group
+ * consecutive flags into one edge, then require a real amplitude change and a
+ * short post-step plateau hold. This deliberately accepts the quick
+ * out-and-back "wiggle" moves used for PID tuning flights (≥50 ms holds),
+ * which the old 400 ms-hold detector discarded.
  */
 export function detectSteps(
   setpoint: Float32Array,
   sampleRate: number,
-  options: { minAmplitude?: number; minGapSamples?: number } = {},
+  options: DetectStepsOptions = {},
 ): StepWindow[] {
-  const { minAmplitude = 150, minGapSamples = 20 } = options;
+  const {
+    minAmplitude = 150,
+    minHoldMs = 50,
+    preQuietMs = 30,
+    windowMs = 300,
+    edgeThresholdDegS2 = 4000,
+  } = options;
   const n = setpoint.length;
-  if (n < 64) return [];
+  if (n < 64 || sampleRate <= 0) return [];
 
-  const windowSamples = Math.round(0.4 * sampleRate);
-  const preSamples = Math.round(0.05 * sampleRate);
+  // Light 3-sample smoothing to reject single-sample noise spikes.
+  const smooth = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = setpoint[Math.max(0, i - 1)]!;
+    const b = setpoint[i]!;
+    const c = setpoint[Math.min(n - 1, i + 1)]!;
+    smooth[i] = (a + b + c) / 3;
+  }
+
+  // Derivative in deg/s².
+  const deriv = new Float64Array(n);
+  for (let i = 1; i < n; i++) deriv[i] = (smooth[i]! - smooth[i - 1]!) * sampleRate;
+
+  const holdSamples = Math.max(2, Math.round((minHoldMs / 1000) * sampleRate));
+  const preQuietSamples = Math.max(2, Math.round((preQuietMs / 1000) * sampleRate));
+  const windowSamples = Math.round((windowMs / 1000) * sampleRate);
+  const preSamples = Math.round(0.02 * sampleRate);
+  const gapTol = Math.max(2, Math.round(0.005 * sampleRate)); // bridge tiny dips in the edge
+
+  // Collect edge runs: contiguous |deriv| >= threshold, bridging short gaps.
+  const edges: [number, number][] = [];
+  let i = 1;
+  while (i < n) {
+    if (Math.abs(deriv[i]!) < edgeThresholdDegS2) {
+      i++;
+      continue;
+    }
+    const start = i;
+    let lastHot = i;
+    while (i < n && (Math.abs(deriv[i]!) >= edgeThresholdDegS2 || i - lastHot <= gapTol)) {
+      if (Math.abs(deriv[i]!) >= edgeThresholdDegS2) lastHot = i;
+      i++;
+    }
+    edges.push([start, lastHot]);
+  }
+
   const steps: StepWindow[] = [];
-  let lastStepEnd = -1;
 
-  for (let i = 1; i < n - 1; i++) {
-    const delta = setpoint[i]! - setpoint[i - 1]!;
-    if (Math.abs(delta) < minAmplitude) continue;
-    if (i < lastStepEnd) continue;
+  for (let e = 0; e < edges.length; e++) {
+    const [e0, e1] = edges[e]!;
 
-    const end = Math.min(n, i + windowSamples);
-    const before = setpoint[Math.max(0, i - preSamples)]!;
-    const after = setpoint[Math.min(n - 1, i + windowSamples)]!;
-    const amplitude = after - before;
+    const preLevel = mean(smooth, Math.max(0, e0 - preSamples), e0);
+    // Plateau estimate: mean over the hold region right after the edge.
+    const plateauStart = e1 + 1;
+    const plateauHoldEnd = plateauStart + holdSamples;
+    if (plateauHoldEnd >= n) continue;
+    const plateau = mean(smooth, plateauStart, plateauHoldEnd);
+    const amplitude = plateau - preLevel;
     if (Math.abs(amplitude) < minAmplitude) continue;
 
-    steps.push({ start: i, end, amplitude });
-    lastStepEnd = end + minGapSamples;
+    // The step must start from a steady state and hold the new level —
+    // otherwise the gyro response can't be attributed to this edge. These
+    // two checks (not a time-based cooldown) are what reject blips and
+    // double-counted edges while still accepting quick out-and-back wiggles.
+    const tol = Math.max(20, Math.abs(amplitude) * 0.1);
+    let valid = true;
+    for (let j = plateauStart; j < plateauHoldEnd; j++) {
+      if (Math.abs(smooth[j]! - plateau) > tol) {
+        valid = false;
+        break;
+      }
+    }
+    if (valid) {
+      const quietStart = Math.max(0, e0 - preQuietSamples);
+      for (let j = quietStart; j < e0; j++) {
+        if (Math.abs(smooth[j]! - preLevel) > tol) {
+          valid = false;
+          break;
+        }
+      }
+    }
+    if (!valid) continue;
+
+    // Response window ends at the next edge (a return move) or the cap.
+    const nextEdgeStart = e + 1 < edges.length ? edges[e + 1]![0] : n;
+    const end = Math.min(n, e0 + windowSamples, nextEdgeStart);
+    if (end - e0 < 16) continue;
+
+    steps.push({
+      start: e0,
+      end,
+      amplitude,
+      plateau,
+      plateauStart,
+      plateauEnd: Math.min(plateauHoldEnd, end),
+    });
   }
   return steps;
 }
 
 /**
  * Average step-response metrics over all detected steps for one axis.
+ * Responses are normalized so 1.0 == gyro reached the new setpoint (the
+ * setpoint plateau amplitude is the reference, not the end-of-window gyro
+ * mean, so out-and-back moves normalize correctly).
  */
 export function stepResponseMetrics(
   gyro: Float32Array,
@@ -55,48 +164,59 @@ export function stepResponseMetrics(
     overshootPercent: 0,
     riseTimeMs: 0,
     settlingTimeMs: 0,
+    latencyMs: 0,
+    ringingCycles: 0,
+    steadyStateErrorPercent: 0,
+    ffStartLagMs: 0,
+    ffEndOvershootPercent: null,
     stepCount: 0,
   };
-  if (steps.length === 0) return empty;
+  if (steps.length === 0 || sampleRate <= 0) return empty;
 
-  const windowSamples = Math.round(0.4 * sampleRate);
-  const normSum = new Float64Array(windowSamples);
-  const normCount = new Int32Array(windowSamples);
   let overshootSum = 0;
   let riseSum = 0;
   let settleSum = 0;
+  let latencySum = 0;
+  let ringingSum = 0;
+  let sseSum = 0;
+  let ffLagSum = 0;
+  let ffEndSum = 0;
+  let ffEndCount = 0;
   let used = 0;
 
-  for (const step of steps) {
+  for (let s = 0; s < steps.length; s++) {
+    const step = steps[s]!;
     const len = step.end - step.start;
     if (len < 16 || Math.abs(step.amplitude) < 1e-6) continue;
-    const base = mean(gyro, step.start - 5, step.start);
+    const base = mean(gyro, Math.max(0, step.start - 5), step.start);
     const sign = step.amplitude > 0 ? 1 : -1;
+    const amp = Math.abs(step.amplitude);
 
     const resp = new Float64Array(len);
     for (let j = 0; j < len; j++) {
-      resp[j] = (gyro[step.start + j]! - base) * sign;
+      resp[j] = ((gyro[step.start + j]! - base) * sign) / amp;
     }
 
-    // normalize by |amplitude| (setpoint change)
-    const amp = Math.abs(step.amplitude);
-    const final = mean(resp, Math.floor(len * 0.8), len);
-    if (Math.abs(final) < 1e-6) continue;
+    // Overshoot: peak beyond 1.0 while the setpoint holds at the plateau.
+    const plateauLen = Math.max(1, step.plateauEnd - step.start);
+    let peak = 0;
+    for (let j = 0; j < Math.min(plateauLen, len); j++) peak = Math.max(peak, resp[j]!);
+    overshootSum += Math.max(0, (peak - 1) * 100);
 
-    for (let j = 0; j < len; j++) {
-      normSum[j] += resp[j]! / final;
-      normCount[j] = normCount[j]! + 1;
+    riseSum += riseTime(resp, sampleRate);
+    settleSum += settlingTime(resp, sampleRate);
+    latencySum += latency(resp, sampleRate);
+    ringingSum += ringing(resp);
+    sseSum += steadyStateError(resp, step, sampleRate);
+    ffLagSum += ffStartLag(gyro, setpoint, step, base, sign, amp, sampleRate);
+
+    // End-of-move overshoot: this step is a return move when the previous
+    // step on this axis went the opposite way shortly before it.
+    const prev = s > 0 ? steps[s - 1]! : null;
+    if (prev && Math.sign(prev.amplitude) !== Math.sign(step.amplitude)) {
+      ffEndSum += Math.max(0, (peak - 1) * 100);
+      ffEndCount++;
     }
-
-    const peak = maxAbs(resp, 0, len);
-    const overshoot = ((peak - Math.abs(final)) / Math.abs(final)) * 100;
-    overshootSum += Math.max(0, overshoot);
-
-    const rise = riseTime(resp, final, sampleRate);
-    riseSum += rise;
-
-    const settle = settlingTime(resp, final, sampleRate);
-    settleSum += settle;
 
     used++;
   }
@@ -108,6 +228,11 @@ export function stepResponseMetrics(
     overshootPercent: overshootSum / used,
     riseTimeMs: riseSum / used,
     settlingTimeMs: settleSum / used,
+    latencyMs: latencySum / used,
+    ringingCycles: ringingSum / used,
+    steadyStateErrorPercent: sseSum / used,
+    ffStartLagMs: ffLagSum / used,
+    ffEndOvershootPercent: ffEndCount > 0 ? ffEndSum / ffEndCount : null,
     stepCount: used,
   };
 }
@@ -122,7 +247,7 @@ export function averageStepResponse(
   setpoint: Float32Array,
   steps: StepWindow[],
   sampleRate: number,
-  windowMs = 150,
+  windowMs = 200,
 ): { tMs: number[]; response: number[] } | null {
   if (steps.length === 0 || sampleRate <= 0) return null;
   const len = Math.round((windowMs / 1000) * sampleRate);
@@ -132,43 +257,35 @@ export function averageStepResponse(
   const count = new Int32Array(len);
   for (const step of steps) {
     if (Math.abs(step.amplitude) < 1e-6) continue;
-    const avail = Math.min(len, setpoint.length - step.start, gyro.length - step.start);
+    const avail = Math.min(len, step.end - step.start, gyro.length - step.start);
     if (avail < 16) continue;
-    const base = mean(gyro, step.start - 5, step.start);
+    const base = mean(gyro, Math.max(0, step.start - 5), step.start);
     const sign = step.amplitude > 0 ? 1 : -1;
-    const final = meanFromDelta(gyro, step.start, Math.floor(avail * 0.8), avail, base, sign);
-    if (Math.abs(final) < 1e-6) continue;
+    const amp = Math.abs(step.amplitude);
     for (let j = 0; j < avail; j++) {
-      sum[j] += ((gyro[step.start + j]! - base) * sign) / final;
+      sum[j] += ((gyro[step.start + j]! - base) * sign) / amp;
       count[j] = count[j]! + 1;
     }
   }
   if (count[0] === 0) return null;
 
+  // Truncate at the last sample covered by any step (windows are capped at
+  // the next edge, so the tail would otherwise be NaN-padded).
+  let last = 0;
+  for (let j = len - 1; j >= 0; j--) {
+    if (count[j]! > 0) {
+      last = j;
+      break;
+    }
+  }
+
   const tMs: number[] = [];
   const response: number[] = [];
-  for (let j = 0; j < len; j++) {
+  for (let j = 0; j <= last; j++) {
     tMs.push((j / sampleRate) * 1000);
     response.push(count[j]! > 0 ? sum[j]! / count[j]! : NaN);
   }
   return { tMs, response };
-}
-
-function meanFromDelta(
-  arr: ArrayLike<number>,
-  startIdx: number,
-  from: number,
-  to: number,
-  base: number,
-  sign: number,
-): number {
-  let s = 0;
-  let n = 0;
-  for (let i = from; i < to; i++) {
-    s += (arr[startIdx + i]! - base) * sign;
-    n++;
-  }
-  return n > 0 ? s / n : 0;
 }
 
 function mean(arr: ArrayLike<number>, start: number, end: number): number {
@@ -180,22 +297,14 @@ function mean(arr: ArrayLike<number>, start: number, end: number): number {
   return sum / (e - s);
 }
 
-function maxAbs(arr: ArrayLike<number>, start: number, end: number): number {
-  let m = 0;
-  for (let i = start; i < end; i++) m = Math.max(m, Math.abs(arr[i]!));
-  return m;
-}
-
-function riseTime(resp: Float64Array, final: number, sampleRate: number): number {
-  const target = Math.abs(final);
-  const t10 = target * 0.1;
-  const t90 = target * 0.9;
+/** Time from 10% to 90% of the normalized response. */
+function riseTime(resp: Float64Array, sampleRate: number): number {
   let i10 = -1;
   let i90 = -1;
   for (let i = 0; i < resp.length; i++) {
-    const v = Math.abs(resp[i]!);
-    if (i10 === -1 && v >= t10) i10 = i;
-    if (v >= t90) {
+    const v = resp[i]!;
+    if (i10 === -1 && v >= 0.1) i10 = i;
+    if (v >= 0.9) {
       i90 = i;
       break;
     }
@@ -204,13 +313,20 @@ function riseTime(resp: Float64Array, final: number, sampleRate: number): number
   return ((i90 - i10) / sampleRate) * 1000;
 }
 
-function settlingTime(resp: Float64Array, final: number, sampleRate: number): number {
-  const target = Math.abs(final);
-  const band = target * 0.05;
-  const holdSamples = Math.round(0.1 * sampleRate);
+/** Time until the response first moves ≥5% — the "latency" PTB reports. */
+function latency(resp: Float64Array, sampleRate: number): number {
+  for (let i = 0; i < resp.length; i++) {
+    if (resp[i]! >= 0.05) return (i / sampleRate) * 1000;
+  }
+  return (resp.length / sampleRate) * 1000;
+}
+
+/** Time until the response stays within ±5% of 1.0 for 50 ms. */
+function settlingTime(resp: Float64Array, sampleRate: number): number {
+  const holdSamples = Math.round(0.05 * sampleRate);
   let inBand = 0;
   for (let i = 0; i < resp.length; i++) {
-    if (Math.abs(resp[i]! - Math.abs(final)) <= band) {
+    if (Math.abs(resp[i]! - 1) <= 0.05) {
       inBand++;
       if (inBand >= holdSamples) return (i / sampleRate) * 1000;
     } else {
@@ -218,4 +334,68 @@ function settlingTime(resp: Float64Array, final: number, sampleRate: number): nu
     }
   }
   return (resp.length / sampleRate) * 1000;
+}
+
+/** Full oscillation cycles around 1.0 after first reaching it (<5% = noise). */
+function ringing(resp: Float64Array): number {
+  let firstReach = -1;
+  for (let i = 0; i < resp.length; i++) {
+    if (resp[i]! >= 1) {
+      firstReach = i;
+      break;
+    }
+  }
+  if (firstReach === -1) return 0;
+  let cycles = 0;
+  let side = 0;
+  for (let i = firstReach; i < resp.length; i++) {
+    const dev = resp[i]! - 1;
+    if (Math.abs(dev) < 0.05) continue;
+    const s = Math.sign(dev);
+    if (side !== 0 && s !== side) cycles += 0.5; // each zero-cross with amplitude = half cycle
+    side = s;
+  }
+  return Math.floor(cycles);
+}
+
+/** Mean |response − 1| over the second half of the plateau hold, in % — the
+ *  first half still contains the rise/catch-up, which is not steady-state. */
+function steadyStateError(resp: Float64Array, step: StepWindow, sampleRate: number): number {
+  void sampleRate;
+  const holdFrom = Math.max(0, step.plateauStart - step.start);
+  const holdTo = Math.min(resp.length, step.plateauEnd - step.start);
+  const from = holdFrom + Math.floor((holdTo - holdFrom) / 2);
+  if (holdTo - from < 4) return 0;
+  let sum = 0;
+  for (let j = from; j < holdTo; j++) sum += Math.abs(resp[j]! - 1);
+  return (sum / (holdTo - from)) * 100;
+}
+
+/**
+ * Feedforward start-of-move lag: time between the setpoint reaching 50% of
+ * the step amplitude and the gyro reaching 50%. Positive = gyro lags (FF too
+ * low); negative = gyro leads (FF boost too high).
+ */
+function ffStartLag(
+  gyro: Float32Array,
+  setpoint: Float32Array,
+  step: StepWindow,
+  gyroBase: number,
+  sign: number,
+  amp: number,
+  sampleRate: number,
+): number {
+  const len = step.end - step.start;
+  const spBase = mean(setpoint, Math.max(0, step.start - 5), step.start);
+  let spHalf = -1;
+  let gyHalf = -1;
+  for (let j = 0; j < len; j++) {
+    const spNorm = ((setpoint[step.start + j]! - spBase) * sign) / amp;
+    const gyNorm = ((gyro[step.start + j]! - gyroBase) * sign) / amp;
+    if (spHalf === -1 && spNorm >= 0.5) spHalf = j;
+    if (gyHalf === -1 && gyNorm >= 0.5) gyHalf = j;
+    if (spHalf !== -1 && gyHalf !== -1) break;
+  }
+  if (spHalf === -1 || gyHalf === -1) return 0;
+  return ((gyHalf - spHalf) / sampleRate) * 1000;
 }

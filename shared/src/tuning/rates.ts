@@ -7,6 +7,7 @@ import {
   type RatesUsage,
 } from "../analysis/rates";
 import { AXES, type Axis, type ProfileSettings } from "../types/fc";
+import { settingsToCli } from "./cli";
 
 /**
  * Rates recommendation engine: given the measured stick usage from a blackbox
@@ -343,7 +344,6 @@ export function recommendRates(usage: RatesUsage | null, style: RatesStyle, size
   }
 
   const axes = [roll, pitch, yaw];
-  const byAxis = Object.fromEntries(axes.map((a) => [a.axis, a])) as Record<Axis, AxisRatesRecommendation>;
 
   const settings: ProfileSettings = {
     rates: {
@@ -359,19 +359,9 @@ export function recommendRates(usage: RatesUsage | null, style: RatesStyle, size
     },
   };
 
-  // CLI block in the BF 4.3+ int format used by the official presets.
-  const cliBlock = [
-    "set rates_type = ACTUAL",
-    `set roll_rc_rate = ${Math.round(byAxis.roll.center / 10)}`,
-    `set pitch_rc_rate = ${Math.round(byAxis.pitch.center / 10)}`,
-    `set yaw_rc_rate = ${Math.round(byAxis.yaw.center / 10)}`,
-    `set roll_expo = ${Math.round(byAxis.roll.expo * 100)}`,
-    `set pitch_expo = ${Math.round(byAxis.pitch.expo * 100)}`,
-    `set yaw_expo = ${Math.round(byAxis.yaw.expo * 100)}`,
-    `set roll_srate = ${Math.round(byAxis.roll.max / 10)}`,
-    `set pitch_srate = ${Math.round(byAxis.pitch.max / 10)}`,
-    `set yaw_srate = ${Math.round(byAxis.yaw.max / 10)}`,
-  ].join("\n");
+  // CLI block in the BF 4.3+ int format used by the official presets —
+  // generated from the same settings object so the two never drift.
+  const cliBlock = ["set rates_type = ACTUAL", ...settingsToCli(settings)].join("\n");
 
   return { style, sizeClass, axes, settings, cliBlock, warnings };
 }

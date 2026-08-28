@@ -154,6 +154,12 @@ export default function ApplyFlow() {
         {connected && step === "review" && (
           <div className="space-y-3">
             <DiffView diff={diff} />
+            {payload?.cliOnlyStripped && payload.cliOnlyStripped.length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                Not MSP-writable on BF 4.4/4.5, excluded from this apply:{" "}
+                {payload.cliOnlyStripped.join(", ")} — use the CLI snippet for those.
+              </p>
+            )}
             {error && <p className="text-sm text-destructive">{error}</p>}
             <div className="flex gap-2">
               <Button onClick={() => void apply()} disabled={busy || diff.length === 0}>

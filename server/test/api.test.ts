@@ -13,12 +13,14 @@ let tmpDir: string;
 beforeAll(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dronetuner-test-"));
   const config: ServerConfig = {
+    host: "127.0.0.1",
     port: 0,
     dataDir: tmpDir,
     photosDir: path.join(tmpDir, "photos"),
     logsDir: path.join(tmpDir, "logs"),
     dbPath: path.join(tmpDir, "test.db"),
     clientOrigin: "http://localhost:5173",
+    clientDist: path.join(tmpDir, "no-client-dist"),
     ollamaUrl: "http://localhost:11434",
     ollamaModel: "llama3.1",
   };

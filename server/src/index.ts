@@ -7,9 +7,9 @@ const db = createDb(config);
 const app = buildApp({ db, config });
 
 app
-  .listen({ port: config.port, host: "127.0.0.1" })
+  .listen({ port: config.port, host: config.host })
   .then(() => {
-    app.log.info(`DroneTuner server listening on http://127.0.0.1:${config.port}`);
+    app.log.info(`DroneTuner server listening on http://${config.host}:${config.port}`);
   })
   .catch((err) => {
     app.log.error(err);

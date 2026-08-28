@@ -1,0 +1,71 @@
+<svg width="1280" height="360" viewBox="0 0 1280 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="DroneTuner — local-first FPV fleet manager and Betaflight PID tuning companion">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#0d1117"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#4ade80"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1f2937" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="360" rx="24" fill="url(#bg)"/>
+  <rect width="1280" height="360" rx="24" fill="url(#grid)" opacity="0.35"/>
+
+  <!-- FFT noise floor, peaks kept in the right-hand spectrum zone -->
+  <path d="M0,315 C40,309 60,320 100,314 C140,309 170,318 220,314 C270,310 300,318 350,314 C400,310 430,317 480,314 C530,311 560,317 610,314 C660,311 690,318 740,315 C790,312 820,317 860,312 C880,310 900,306 915,290 C930,268 948,232 962,220 C971,212 979,212 988,220 C1002,234 1018,268 1032,288 C1046,305 1062,312 1088,313 C1110,315 1122,311 1132,299 C1142,287 1152,272 1162,268 C1172,264 1182,267 1191,278 C1201,289 1211,305 1230,310 C1245,313 1262,314 1280,313 L1280,360 L0,360 Z" fill="url(#wave)" opacity="0.08"/>
+  <path d="M0,315 C40,309 60,320 100,314 C140,309 170,318 220,314 C270,310 300,318 350,314 C400,310 430,317 480,314 C530,311 560,317 610,314 C660,311 690,318 740,315 C790,312 820,317 860,312 C880,310 900,306 915,290 C930,268 948,232 962,220 C971,212 979,212 988,220 C1002,234 1018,268 1032,288 C1046,305 1062,312 1088,313 C1110,315 1122,311 1132,299 C1142,287 1152,272 1162,268 C1172,264 1182,267 1191,278 C1201,289 1211,305 1230,310 C1245,313 1262,314 1280,313" fill="none" stroke="url(#wave)" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- peak markers with axis-style labels -->
+  <line x1="975" y1="219" x2="975" y2="315" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="4 6" opacity="0.45"/>
+  <line x1="1168" y1="270" x2="1168" y2="315" stroke="#4ade80" stroke-width="1.5" stroke-dasharray="4 6" opacity="0.45"/>
+  <circle cx="975" cy="216" r="5" fill="#22d3ee"/>
+  <circle cx="1168" cy="267" r="5" fill="#4ade80"/>
+  <text x="975" y="340" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#67e8f9">126 Hz</text>
+  <text x="1168" y="340" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#86efac">238 Hz</text>
+
+  <!-- quadcopter mark -->
+  <circle cx="200" cy="150" r="130" fill="url(#glow)"/>
+  <g stroke-linecap="round">
+    <line x1="200" y1="150" x2="132" y2="82" stroke="#6b7280" stroke-width="10"/>
+    <line x1="200" y1="150" x2="268" y2="82" stroke="#6b7280" stroke-width="10"/>
+    <line x1="200" y1="150" x2="132" y2="218" stroke="#6b7280" stroke-width="10"/>
+    <line x1="200" y1="150" x2="268" y2="218" stroke="#6b7280" stroke-width="10"/>
+  </g>
+  <g>
+    <circle cx="132" cy="82" r="36" stroke="#22d3ee" stroke-width="2" stroke-dasharray="6 9" opacity="0.5" fill="none"/>
+    <circle cx="268" cy="82" r="36" stroke="#22d3ee" stroke-width="2" stroke-dasharray="6 9" opacity="0.5" fill="none"/>
+    <circle cx="132" cy="218" r="36" stroke="#22d3ee" stroke-width="2" stroke-dasharray="6 9" opacity="0.5" fill="none"/>
+    <circle cx="268" cy="218" r="36" stroke="#22d3ee" stroke-width="2" stroke-dasharray="6 9" opacity="0.5" fill="none"/>
+    <circle cx="132" cy="82" r="19" fill="#0d1117" stroke="#22d3ee" stroke-width="4"/>
+    <circle cx="268" cy="82" r="19" fill="#0d1117" stroke="#22d3ee" stroke-width="4"/>
+    <circle cx="132" cy="218" r="19" fill="#0d1117" stroke="#22d3ee" stroke-width="4"/>
+    <circle cx="268" cy="218" r="19" fill="#0d1117" stroke="#22d3ee" stroke-width="4"/>
+  </g>
+  <circle cx="200" cy="150" r="17" fill="#22d3ee"/>
+  <circle cx="200" cy="150" r="7" fill="#0d1117"/>
+
+  <!-- wordmark -->
+  <text x="330" y="158" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="76" font-weight="800" letter-spacing="-1">
+    <tspan fill="#f9fafb">Drone</tspan><tspan fill="#22d3ee">Tuner</tspan>
+  </text>
+  <text x="332" y="206" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="26" fill="#9ca3af">Local-first FPV fleet management &amp; Betaflight PID tuning</text>
+
+  <!-- feature chips -->
+  <g font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="18" fill="#d1d5db">
+    <rect x="330" y="238" width="184" height="38" rx="19" fill="#111827" stroke="#263143"/>
+    <text x="348" y="263">Blackbox FFT Lab</text>
+    <rect x="526" y="238" width="176" height="38" rx="19" fill="#111827" stroke="#263143"/>
+    <text x="544" y="263">Safe MSP Writes</text>
+    <rect x="714" y="238" width="168" height="38" rx="19" fill="#111827" stroke="#263143"/>
+    <text x="732" y="263">Ollama Copilot</text>
+  </g>
+</svg>

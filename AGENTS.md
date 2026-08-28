@@ -41,4 +41,6 @@ The implementation plan at `.kilo/plans/1787586171963-dronetuner-implementation-
 ## Data
 
 - SQLite at `server/data/dronetuner.db`; uploads under `server/data/photos/` and `server/data/logs/`.
-- Server config via `server/.env` (see `server/.env.example`): `PORT`, `DATA_DIR`, `OLLAMA_URL`, `OLLAMA_MODEL`, `CLIENT_ORIGIN`.
+- Server config via `server/.env` (see `server/.env.example`): `HOST`, `PORT`, `DATA_DIR`, `OLLAMA_URL`, `OLLAMA_MODEL`, `CLIENT_ORIGIN`, `CLIENT_DIST`.
+- When `CLIENT_DIST` is explicitly set and contains a built client (`index.html` present), the server serves it at `/` with an SPA fallback (non-`/api` GET/HEAD requests get `index.html`); this is the production/Docker mode. Unset by default so dev never serves a stale bundle.
+- Docker: root `Dockerfile` (multi-stage: pnpm install → client build → runtime on `node:20-bookworm-slim`, `HOST=0.0.0.0`, `DATA_DIR=/data` volume, idempotent seed at container start) and `docker-compose.yml` (app on :3001 + optional `ai` profile running Ollama).

@@ -2,6 +2,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
+import fs from "node:fs";
+import path from "node:path";
 import { ZodError } from "zod";
 import type { AppContext } from "./context";
 import componentsRoutes from "./routes/components";
@@ -57,6 +59,26 @@ export function buildApp(ctx: AppContext): FastifyInstance {
   app.register(detectRoutes, { ctx });
   app.register(vendorPresetsRoutes, { ctx });
   app.register(chatRoutes, { ctx });
+
+  // Serve the built client (production / Docker) when a bundle is configured and exists.
+  const clientDist = ctx.config.clientDist;
+  if (clientDist && fs.existsSync(path.join(clientDist, "index.html"))) {
+    app.register(fastifyStatic, {
+      root: clientDist,
+      prefix: "/",
+      decorateReply: false,
+    });
+    // SPA fallback: client-side routes get index.html, unknown API routes get JSON 404.
+    app.setNotFoundHandler((req, reply) => {
+      const pathname = req.url.split("?", 1)[0] ?? req.url;
+      const isApi = pathname === "/api" || pathname.startsWith("/api/");
+      if ((req.method === "GET" || req.method === "HEAD") && !isApi) {
+        void reply.type("text/html").send(fs.createReadStream(path.join(clientDist, "index.html")));
+        return;
+      }
+      void reply.code(404).send({ error: "Not found" });
+    });
+  }
 
   return app;
 }

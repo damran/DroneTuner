@@ -1,0 +1,41 @@
+services:
+  app:
+    build: .
+    image: dronetuner:latest
+    container_name: dronetuner
+    ports:
+      # Loopback only: the API has no auth. Drop "127.0.0.1:" to expose it to your LAN.
+      - "127.0.0.1:3001:3001"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3001
+      DATA_DIR: /data
+      # Same-origin in Docker, so CORS only matters if you front it with another origin.
+      CLIENT_ORIGIN: http://localhost:3001
+      # AI copilot: point at Ollama running on the Docker host...
+      OLLAMA_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: llama3.1
+      # ...or, with the "ai" profile enabled below, use the bundled Ollama service:
+      # OLLAMA_URL: http://ollama:11434
+    extra_hosts:
+      # Lets the container reach Ollama on the host (no-op on Docker Desktop, needed on Linux).
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - dronetuner-data:/data
+    restart: unless-stopped
+
+  # Optional: run Ollama in Docker too. Start with: docker compose --profile ai up -d
+  # Then pull a tool-calling model once:  docker compose exec ollama ollama pull llama3.1
+  ollama:
+    image: ollama/ollama:latest
+    container_name: dronetuner-ollama
+    profiles: ["ai"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  dronetuner-data:
+  ollama-data:

@@ -1,5 +1,6 @@
 import type { ParsedLog } from "../blackbox/types";
 import { amplitudeSpectrum, findPeaks, median, rms } from "./fft";
+import { computeRatesUsage } from "./rates";
 import { detectSteps, stepResponseMetrics } from "./steps";
 import type { AxisStepMetrics, LogMetrics, NoisePeak } from "./types";
 import { AXES, type Axis } from "../types/fc";
@@ -144,6 +145,11 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
     log.headers["dshot_bidir"] === "ON" ||
     log.headers["debug_mode"] === "RPM_FILTER";
 
+  const ratesUsage = computeRatesUsage(log);
+  if (!ratesUsage) {
+    warnings.push("No setpoint channels in this log — rates usage analysis unavailable.");
+  }
+
   return {
     durationS,
     sampleRateHz: Math.round(sampleRate),
@@ -159,6 +165,7 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
     vbatSagV,
     filterLatencyMs,
     rpmFilterActive,
+    ratesUsage,
     warnings,
   };
 }

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { FileUp, Loader2 } from "lucide-react";
-import type { Analysis, DroneSummary, FlightLog } from "@dronetuner/shared";
+import type { Analysis, DroneSummary, Flight, FlightLog } from "@dronetuner/shared";
 import { parseBlackboxLog } from "@dronetuner/shared/blackbox";
 import { amplitudeSpectrum, averageStepResponse, detectSteps, findPeaks } from "@dronetuner/shared/analysis";
 import type { ParsedLog } from "@dronetuner/shared/blackbox";
@@ -11,6 +11,7 @@ import { formatDate, formatDuration, formatPercent, formatVolts } from "@/lib/fo
 import { EChart } from "@/components/charts/EChart";
 import { UplotChart } from "@/components/charts/UplotChart";
 import FindingsPanel from "@/components/FindingsPanel";
+import RatesAdvisor from "@/components/RatesAdvisor";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -68,6 +69,14 @@ export default function LogLabPage() {
     queryFn: () => apiGet<Analysis>(`/api/logs/${selectedLog}/analysis`),
     retry: false,
   });
+  const { data: flights } = useQuery({
+    queryKey: ["flights", droneId],
+    enabled: !!droneId,
+    queryFn: () => apiGet<Flight[]>(`/api/flights?droneId=${droneId}`),
+  });
+
+  const drone = drones?.find((d) => String(d.id) === droneId);
+  const flightForLog = flights?.find((f) => f.logId === selectedLog);
 
   const upload = useMutation({
     mutationFn: async (file: File) => {
@@ -213,6 +222,23 @@ export default function LogLabPage() {
                     <FindingsPanel findings={analysisQuery.data.findings} />
                   </div>
                 )}
+              </CardContent>
+            </Card>
+          )}
+
+          {analysisQuery.data && drone && analysisQuery.data.metrics.ratesUsage && (
+            <RatesAdvisor
+              key={selectedLog}
+              usage={analysisQuery.data.metrics.ratesUsage}
+              sizeClass={drone.sizeClass}
+              initialStyle={flightForLog?.styleTag}
+            />
+          )}
+
+          {analysisQuery.data && drone && analysisQuery.data.metrics.ratesUsage === undefined && (
+            <Card>
+              <CardContent className="p-4 text-sm text-muted-foreground">
+                Rates advisor: this analysis predates rates-usage extraction — click Re-analyze to compute it.
               </CardContent>
             </Card>
           )}

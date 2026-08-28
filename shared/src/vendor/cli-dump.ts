@@ -57,14 +57,28 @@ const FILTER_KEYS: Record<string, { field: string; enum?: Record<string, number>
   dyn_notch_q: { field: "dynNotchQ" },
 };
 
-/** RC tuning keys. CLI prints these as 2-decimal floats; MSP stores them ×100. */
+/**
+ * RC tuning keys. BF 4.3+ prints these as plain ints (deg/s ÷ 10 for rates,
+ * ×100 for expo); pre-4.3 dumps may show 2-decimal floats — parseScaled
+ * handles both. Both the modern per-axis names (`roll_rc_rate`, …) and the
+ * legacy names (`rc_rate`, …) map onto the same MSP fields.
+ */
 const RATE_KEYS: Record<string, string> = {
+  // BF 4.3+ per-axis names (used by current dumps and official presets)
+  roll_rc_rate: "rcRate",
+  pitch_rc_rate: "rcRatePitch",
+  yaw_rc_rate: "rcRateYaw",
+  roll_expo: "rcExpo",
+  pitch_expo: "rcExpoPitch",
+  yaw_expo: "rcExpoYaw",
+  // legacy (pre-4.3) names
   rc_rate: "rcRate",
   rc_expo: "rcExpo",
   rc_rate_pitch: "rcRatePitch",
   rc_expo_pitch: "rcExpoPitch",
   rc_rate_yaw: "rcRateYaw",
   rc_expo_yaw: "rcExpoYaw",
+  // unchanged across versions
   roll_srate: "rollRate",
   pitch_srate: "pitchRate",
   yaw_srate: "yawRate",

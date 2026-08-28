@@ -1,4 +1,5 @@
 import type { Axis, ProfileSettings } from "../types/fc";
+import type { RatesUsage } from "./rates";
 
 export interface NoisePeak {
   axis: Axis;
@@ -40,6 +41,12 @@ export interface LogMetrics {
   /** rough estimate from step-response rise time */
   filterLatencyMs: number | null;
   rpmFilterActive: boolean;
+  /**
+   * Stick/rate usage stats (setpoint histogram, zones, achieved-vs-commanded).
+   * Absent in analyses persisted before the rates advisor existed — the UI
+   * offers to re-analyze in that case. Null when the log lacks setpoint data.
+   */
+  ratesUsage?: RatesUsage | null;
   /** non-fatal caveats discovered while parsing/analyzing */
   warnings: string[];
 }

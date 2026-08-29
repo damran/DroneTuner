@@ -5,6 +5,7 @@ import path from "node:path";
 import { buildApp } from "../src/app";
 import type { ServerConfig } from "../src/config";
 import { createDb } from "../src/db";
+import { profiles } from "../src/db/schema";
 
 let app: ReturnType<typeof buildApp>;
 let db: ReturnType<typeof createDb>;
@@ -66,7 +67,7 @@ describe("api", () => {
       url: "/api/drones",
       payload: { name: "Test Whoop", sizeClass: "65mm" },
     });
-    const droneId = drone.json().id;
+    expect(drone.statusCode).toBe(200);
 
     const profile = await app.inject({
       method: "POST",
@@ -99,5 +100,108 @@ describe("api", () => {
     expect(plan.json().diff.length).toBe(1);
     expect(plan.json().diff[0].label).toBe("Roll P");
     expect(plan.json().sections).toContain("pids");
+  });
+
+  it("profile settings strip unknown keys and reject out-of-range values", async () => {
+    // Unknown keys are dropped (no phantom diff rows for the MSP write path)…
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/profiles",
+      payload: {
+        name: "Schema Probe",
+        goal: "freestyle",
+        settings: { filters: { dynNotchCount: 2, notARealKey: 42 }, rates: { rcRate: 100 } },
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    expect(created.json().settings.filters).toEqual({ dynNotchCount: 2 });
+
+    // …and out-of-range values are rejected outright.
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/api/profiles",
+      payload: { name: "Bad", goal: "freestyle", settings: { advanced: { tpaRate: 500 } } },
+    });
+    expect(rejected.statusCode).not.toBe(200);
+  });
+
+  it("snapshots only accept the four restorable MSP SET commands", async () => {
+    const drone = await app.inject({
+      method: "POST",
+      url: "/api/drones",
+      payload: { name: "Snap Whoop", sizeClass: "65mm" },
+    });
+    const droneId = drone.json().id;
+    const dump = {
+      apiVersion: "1.46.0",
+      fcVariant: "BTFL",
+      fcVersion: "4.5.1",
+      capturedAt: Date.now(),
+      decoded: { pids: {} },
+    };
+    // MSP_REBOOT (68) must never be replayable from a stored snapshot.
+    const bad = await app.inject({
+      method: "POST",
+      url: "/api/snapshots",
+      payload: { droneId, dump: { ...dump, sections: [{ command: 68, payloadHex: "00" }] } },
+    });
+    expect(bad.statusCode).toBe(400);
+
+    // MSP_SET_PID (202) with a valid hex payload is fine.
+    const good = await app.inject({
+      method: "POST",
+      url: "/api/snapshots",
+      payload: { droneId, dump: { ...dump, sections: [{ command: 202, payloadHex: "2e5a28" }] } },
+    });
+    expect(good.statusCode).toBe(200);
+
+    // Malformed hex is rejected too.
+    const badHex = await app.inject({
+      method: "POST",
+      url: "/api/snapshots",
+      payload: { droneId, dump: { ...dump, sections: [{ command: 202, payloadHex: "zz" }] } },
+    });
+    expect(badHex.statusCode).toBe(400);
+  });
+
+  it("seed templates are read-only via PATCH (seed refreshes them in place)", async () => {
+    const [tpl] = await db
+      .insert(profiles)
+      .values({
+        name: "65mm Racing", // exact seed template name
+        goal: "racing",
+        sizeClass: "65mm",
+        droneId: null,
+        settingsJson: {},
+        source: "template",
+        createdAt: Date.now(),
+      })
+      .returning();
+    const blocked = await app.inject({
+      method: "PATCH",
+      url: `/api/profiles/${tpl!.id}`,
+      payload: { settings: { pids: { roll: { p: 99 } } } },
+    });
+    expect(blocked.statusCode).toBe(409);
+
+    // A user copy (" (copy)" name) stays editable.
+    const [copy] = await db
+      .insert(profiles)
+      .values({
+        name: "65mm Racing (copy)",
+        goal: "racing",
+        sizeClass: "65mm",
+        droneId: null,
+        settingsJson: {},
+        source: "template",
+        createdAt: Date.now(),
+      })
+      .returning();
+    const allowed = await app.inject({
+      method: "PATCH",
+      url: `/api/profiles/${copy!.id}`,
+      payload: { settings: { pids: { roll: { p: 99 } } } },
+    });
+    expect(allowed.statusCode).toBe(200);
   });
 });

@@ -4,7 +4,7 @@
  * parsing, I/P/S/E/G/H frames, all standard field encodings and predictors.
  */
 
-import { ByteStream, EOF, hexToFloat, parseCommaSeparatedString, parseGyroScale } from "./stream";
+import { ByteStream, EOF, parseCommaSeparatedString, parseGyroScale } from "./stream";
 import {
   readTag2_3S32,
   readTag2_3SVariable,
@@ -100,6 +100,8 @@ export class BlackboxParser {
   private timeUs = new GrowableF32();
   private frameCount = 0;
   private warnings: string[] = [];
+  private warnedMessages = new Set<string>();
+  private truncated = false;
 
   constructor(data: Uint8Array, opts: ParseOptions = {}) {
     this.stream = new ByteStream(data);
@@ -162,8 +164,24 @@ export class BlackboxParser {
       looptimeUs: this.looptimeUs,
       gyroScale: this.gyroScale,
       firmware: this.firmware,
+      truncated: this.truncated,
       warnings: this.warnings,
     };
+  }
+
+  /**
+   * Non-fatal parse caveats. Deduped by `key` (a systematically unsupported
+   * encoding throws on every frame) and capped so a corrupt log can't grow
+   * the array without bound.
+   */
+  private warn(key: string, message: string): void {
+    if (this.warnedMessages.has(key)) return;
+    this.warnedMessages.add(key);
+    if (this.warnings.length < 20) {
+      this.warnings.push(message);
+    } else if (this.warnings.length === 20) {
+      this.warnings.push("Further parser warnings suppressed.");
+    }
   }
 
   private parseHeader(): void {
@@ -331,13 +349,20 @@ export class BlackboxParser {
         }
         // else: unknown byte — skip it (resync)
       } catch (err) {
-        // Corrupt/truncated frame: rescan from the byte after the frame marker
+        // Corrupt/truncated frame: rescan from the byte after the frame
+        // marker. Surface the cause — a BlackboxParseError here means an
+        // unsupported encoding/predictor/event, exactly what the user needs
+        // to know about (an empty channel set with no explanation otherwise).
         this.stream.pos = frameStart + 1;
         this.stream.eof = false;
-        if (!(err instanceof BlackboxParseError)) {
-          this.warnings.push(`Skipped corrupt frame at offset ${frameStart}`);
-        }
+        const reason = err instanceof Error ? err.message : String(err);
+        this.warn(reason, `Skipped frame at offset ${frameStart}: ${reason}`);
       }
+    }
+
+    if (this.frameCount >= maxFrames) {
+      this.truncated = true;
+      this.warn("truncated", `Log truncated at the ${maxFrames}-frame parse cap — analysis covers the first portion only.`);
     }
   }
 
@@ -379,7 +404,6 @@ export class BlackboxParser {
   ): void {
     const predictor = frameDef.predictor;
     const encoding = frameDef.encoding;
-    const values = new Array<number>(8);
     let i = 0;
 
     while (i < frameDef.count) {

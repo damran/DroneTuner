@@ -1,4 +1,3 @@
-import type { Axis } from "../types/fc";
 import { AXES } from "../types/fc";
 import type { LogMetrics } from "./types";
 

@@ -1,4 +1,5 @@
 import type { ProfileSettings } from "../types/fc";
+import { RATES_TYPE_NAMES } from "../types/fc";
 
 /**
  * ProfileSettings → Betaflight 4.5 CLI `set` lines. Used for the "Copy CLI"
@@ -22,7 +23,10 @@ export const CLI_ONLY_KEYS: ReadonlySet<string> = new Set([
 const FILTER_TYPE_NAMES = ["PT1", "BIQUAD", "PT2", "PT3"];
 const ITERM_RELAX_NAMES = ["OFF", "RP", "RPY", "RP_INC", "RPY_INC"];
 const FF_AVERAGING_NAMES = ["OFF", "2_POINT", "3_POINT", "4_POINT"];
-const TPA_MODE_NAMES = ["D", "PD"];
+// BF lookupTableTpaMode (settings.c): PD=0 (attenuate P and D), D=1 (D only).
+// Exported so the CLI-dump parser derives its reverse lookup from the same
+// table — the two must never drift.
+export const TPA_MODE_NAMES = ["PD", "D"];
 
 const PID_CLI: Record<string, string> = {
   "roll.p": "p_roll",
@@ -85,6 +89,11 @@ const RATE_CLI: Record<string, string> = {
   yawRate: "yaw_srate",
   thrMid: "thr_mid",
   thrExpo: "thr_expo",
+  ratesType: "rates_type",
+};
+
+const RATE_ENUM_CLI: Record<string, readonly string[]> = {
+  ratesType: RATES_TYPE_NAMES,
 };
 
 const ADVANCED_CLI: Record<string, string> = {
@@ -118,7 +127,7 @@ const ADVANCED_ENUM_CLI: Record<string, string[]> = {
   tpaMode: TPA_MODE_NAMES,
 };
 
-function enumName(table: string[], v: number): string {
+function enumName(table: readonly string[], v: number): string {
   return table[v] ?? String(v);
 }
 
@@ -160,7 +169,8 @@ export function settingsToCli(settings: ProfileSettings): string[] {
       if (v === undefined) continue;
       const cli = RATE_CLI[key];
       if (!cli) continue;
-      lines.push(`set ${cli} = ${v}`);
+      const enumTable = RATE_ENUM_CLI[key];
+      lines.push(`set ${cli} = ${enumTable ? enumName(enumTable, v) : v}`);
     }
   }
 

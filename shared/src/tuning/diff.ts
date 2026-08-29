@@ -1,5 +1,5 @@
 import type { ConfigSection, DiffEntry, FcConfig, ProfileSettings } from "../types/fc";
-import { CONFIG_SECTION_ORDER } from "../types/fc";
+import { CONFIG_SECTION_ORDER, RATES_TYPE, RATES_TYPE_NAMES } from "../types/fc";
 
 export interface DiffResult {
   diff: DiffEntry[];
@@ -48,11 +48,12 @@ const RATE_LABELS: Record<string, string> = {
   rcExpoPitch: "RC expo (pitch)",
   rcRateYaw: "RC rate (yaw)",
   rcExpoYaw: "RC expo (yaw)",
-  rollRate: "Roll super rate",
-  pitchRate: "Pitch super rate",
-  yawRate: "Yaw super rate",
+  rollRate: "Roll super/max rate",
+  pitchRate: "Pitch super/max rate",
+  yawRate: "Yaw super/max rate",
   thrMid: "Throttle mid",
   thrExpo: "Throttle expo",
+  ratesType: "Rates type",
 };
 
 const ADVANCED_LABELS: Record<string, string> = {
@@ -80,12 +81,31 @@ const ADVANCED_LABELS: Record<string, string> = {
   idleMinRpm: "Dynamic idle min RPM",
 };
 
-function formatValue(path: string, v: number): string {
-  // Rates and TPA rate are stored x100 (e.g. 110 == 1.10); feedforward is
-  // displayed as a raw integer in Betaflight, so leave it unscaled.
-  if (path.startsWith("rates.")) return (v / 100).toFixed(2);
+/** Rate keys whose scale/meaning depends on rates_type (deg/s ÷ 10 under ACTUAL). */
+const RATE_VALUE_KEYS = new Set(["rcRate", "rcRatePitch", "rcRateYaw", "rollRate", "pitchRate", "yawRate"]);
+
+/**
+ * Display formatting for a setting value. Rates, expo and TPA rate are stored
+ * ×100 (e.g. 110 == 1.10) — except the rate keys under rates_type ACTUAL,
+ * which are deg/s ÷ 10 (e.g. 67 == 670 °/s). Feedforward is displayed as a
+ * raw integer, like Betaflight does.
+ */
+export function formatSettingValue(path: string, v: number, ratesType?: number): string {
+  if (path === "rates.ratesType") return RATES_TYPE_NAMES[v] ?? String(v);
+  if (path.startsWith("rates.")) {
+    if (ratesType === RATES_TYPE.ACTUAL && RATE_VALUE_KEYS.has(path.slice(6))) {
+      return `${v * 10} °/s`;
+    }
+    return (v / 100).toFixed(2);
+  }
   if (path === "advanced.tpaRate") return (v / 100).toFixed(2);
   return String(v);
+}
+
+/** Human label for a setting key within its section (falls back to the raw key). */
+export function settingLabel(section: "filters" | "rates" | "advanced", key: string): string {
+  const map = section === "filters" ? FILTER_LABELS : section === "rates" ? RATE_LABELS : ADVANCED_LABELS;
+  return map[key] ?? key;
 }
 
 const AXES = ["roll", "pitch", "yaw"] as const;
@@ -101,6 +121,8 @@ export function diffConfig(current: FcConfig, target: ProfileSettings): DiffResu
     label: string,
     from: number | undefined,
     to: number | undefined,
+    fromRatesType?: number,
+    toRatesType?: number,
   ): void => {
     if (to === undefined) return;
     if (from === to) return;
@@ -110,8 +132,8 @@ export function diffConfig(current: FcConfig, target: ProfileSettings): DiffResu
       label,
       from: from ?? null,
       to,
-      fromDisplay: from === undefined ? "?" : formatValue(path, from),
-      toDisplay: formatValue(path, to),
+      fromDisplay: from === undefined ? "?" : formatSettingValue(path, from, fromRatesType),
+      toDisplay: formatSettingValue(path, to, toRatesType ?? fromRatesType),
     });
     touched.add(section);
   };
@@ -131,8 +153,12 @@ export function diffConfig(current: FcConfig, target: ProfileSettings): DiffResu
     compare("filters", `filters.${key}`, FILTER_LABELS[key] ?? key, current.filters[key], to);
   }
 
+  // Rate values are formatted under each side's own convention: when a
+  // profile switches rates_type, "from" and "to" are in different units.
+  const currentRatesType = current.rates.ratesType;
+  const targetRatesType = target.rates?.ratesType ?? currentRatesType;
   for (const [key, to] of Object.entries(target.rates ?? {})) {
-    compare("rates", `rates.${key}`, RATE_LABELS[key] ?? key, current.rates[key], to);
+    compare("rates", `rates.${key}`, RATE_LABELS[key] ?? key, current.rates[key], to, currentRatesType, targetRatesType);
   }
 
   for (const [key, to] of Object.entries(target.advanced ?? {})) {

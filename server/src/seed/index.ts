@@ -1,3 +1,4 @@
+import { and, eq, isNull } from "drizzle-orm";
 import { loadConfig } from "../config";
 import { createDb } from "../db";
 import { components, profiles } from "../db/schema";
@@ -25,24 +26,36 @@ async function seed(): Promise<void> {
     console.log("Components already seeded, skipping");
   }
 
-  const existingProfiles = await db.select().from(profiles).limit(1);
-  if (existingProfiles.length === 0) {
-    for (const t of templatesData) {
+  // Templates are managed content: refresh them in place (matched by name)
+  // so seed updates reach existing installs, without ever touching
+  // user-created or drone-assigned profiles.
+  let inserted = 0;
+  let updated = 0;
+  for (const t of templatesData) {
+    const existing = await db
+      .select()
+      .from(profiles)
+      .where(and(eq(profiles.name, t.name), eq(profiles.source, "template"), isNull(profiles.droneId)))
+      .get();
+    if (existing) {
       await db
-        .insert(profiles)
-        .values({
-          name: t.name,
-          goal: t.goal,
-          sizeClass: t.sizeClass ?? null,
-          settingsJson: t.settings,
-          source: "template",
-          createdAt: Date.now(),
-        });
+        .update(profiles)
+        .set({ goal: t.goal, sizeClass: t.sizeClass ?? null, settingsJson: t.settings })
+        .where(eq(profiles.id, existing.id));
+      updated++;
+    } else {
+      await db.insert(profiles).values({
+        name: t.name,
+        goal: t.goal,
+        sizeClass: t.sizeClass ?? null,
+        settingsJson: t.settings,
+        source: "template",
+        createdAt: Date.now(),
+      });
+      inserted++;
     }
-    console.log(`Seeded ${templatesData.length} profile templates`);
-  } else {
-    console.log("Profiles already seeded, skipping");
   }
+  console.log(`Profile templates: ${inserted} inserted, ${updated} updated`);
 
   console.log("Seed complete");
 }

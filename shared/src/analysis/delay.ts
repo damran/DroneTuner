@@ -182,13 +182,17 @@ export function groupDelayMs(sections: Section[], freqHz: number, sampleRateHz: 
   if (sections.length === 0) return 0;
   const w = (2 * Math.PI * freqHz) / sampleRateHz;
   const eps = Math.max(1e-7, w * 1e-4);
-  const phiPlus = phaseOfSections(sections, w + eps);
-  const phiMinus = phaseOfSections(sections, Math.max(1e-7, w - eps));
+  // Divide by the ACTUAL sample spacing: near w=0 the lower point is clamped,
+  // making the difference one-sided (asymmetric span).
+  const wPlus = w + eps;
+  const wMinus = Math.max(1e-7, w - eps);
+  const phiPlus = phaseOfSections(sections, wPlus);
+  const phiMinus = phaseOfSections(sections, wMinus);
   let dphi = phiPlus - phiMinus;
   // unwrap
   if (dphi > Math.PI) dphi -= 2 * Math.PI;
   if (dphi < -Math.PI) dphi += 2 * Math.PI;
-  const delaySamples = -dphi / (2 * eps);
+  const delaySamples = -dphi / (wPlus - wMinus);
   return (delaySamples / sampleRateHz) * 1000;
 }
 
@@ -258,15 +262,26 @@ function buildStages(
     }
   }
 
-  // Dynamic notch (gyro rate), positioned at the detected resonance or its
-  // minimum frequency (worst case).
+  // Dynamic notch (gyro rate). BF places its N notches at N distinct detected
+  // peaks — model that as one notch on the detected resonance (or the range
+  // minimum, worst case) with the rest spread evenly across the configured
+  // range. Stacking all N on one frequency would roughly multiply the delay
+  // there and inflate the headline number.
   const notchCount = Math.round(config.dynNotchCount);
   if (notchCount > 0) {
     const f0 = resonanceHz && resonanceHz >= config.dynNotchMinHz ? resonanceHz : config.dynNotchMinHz;
-    const sections: Section[] = [];
+    const hi = Math.max(config.dynNotchMaxHz, f0);
+    const positions: number[] = [f0];
+    for (let k = 1; k < notchCount; k++) {
+      positions.push(config.dynNotchMinHz + ((hi - config.dynNotchMinHz) * k) / notchCount);
+    }
     // dyn_notch_q is centi-Q (300 → Q 3.0)
-    for (let k = 0; k < notchCount; k++) sections.push(biquadNotchSection(f0, config.dynNotchQ / 100, gyroRate));
-    stages.push({ name: `Dynamic notch ×${notchCount} @ ${Math.round(f0)} Hz`, sections, chain: "gyro" });
+    const sections = positions.map((f) => biquadNotchSection(f, config.dynNotchQ / 100, gyroRate));
+    stages.push({
+      name: `Dynamic notch ×${notchCount} @ ${positions.map((f) => Math.round(f)).join("/")} Hz`,
+      sections,
+      chain: "gyro",
+    });
   }
 
   // Gyro LPF1: dynamic (min..max) overrides the static value when active.

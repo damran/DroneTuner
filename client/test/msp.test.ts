@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { buildMspV2Request, crc8DvbS2, ResponseParser } from "../src/lib/msp/codec";
-import { FILTER_FIELDS, decodePid, encodePid, isWritableApi, patchPayload } from "../src/lib/msp/config";
+import {
+  FILTER_FIELDS,
+  RESTORABLE_COMMANDS,
+  decodeDumpSections,
+  decodePid,
+  encodePid,
+  isWritableApi,
+  patchPayload,
+} from "../src/lib/msp/config";
+import { MSP_SET_PID, MSP_SET_RC_TUNING, MSP_SET_FILTER_CONFIG, MSP_SET_PID_ADVANCED } from "../src/lib/msp/commands";
+import { toHex } from "../src/lib/msp/codec";
 
 describe("msp codec", () => {
   it("crc8 is a byte", () => {
@@ -78,5 +88,37 @@ describe("msp codec", () => {
     expect(isWritableApi("1.44.0")).toBe(false);
     expect(isWritableApi("1.47.0")).toBe(false);
     expect(isWritableApi("2.0.0")).toBe(false);
+  });
+
+  it("restorable commands are exactly the four tuning SET commands", () => {
+    expect([...RESTORABLE_COMMANDS].sort((a, b) => a - b)).toEqual([
+      MSP_SET_FILTER_CONFIG,
+      MSP_SET_PID_ADVANCED,
+      MSP_SET_PID,
+      MSP_SET_RC_TUNING,
+    ]);
+  });
+
+  it("decodeDumpSections decodes the actual payloads to be replayed", () => {
+    const pidPayload = encodePid([
+      [46, 90, 40],
+      [48, 90, 40],
+      [80, 100, 0],
+    ]);
+    const ratesPayload = new Uint8Array(23);
+    ratesPayload[0] = 100; // rcRate
+    ratesPayload[22] = 3; // ratesType = ACTUAL
+    const settings = decodeDumpSections([
+      { command: MSP_SET_PID, payloadHex: toHex(pidPayload) },
+      { command: MSP_SET_RC_TUNING, payloadHex: toHex(ratesPayload) },
+    ]);
+    expect(settings?.pids?.roll).toEqual({ p: 46, i: 90, d: 40 });
+    expect(settings?.rates?.rcRate).toBe(100);
+    expect(settings?.rates?.ratesType).toBe(3);
+  });
+
+  it("decodeDumpSections refuses unknown commands", () => {
+    expect(decodeDumpSections([{ command: 68, payloadHex: "00" }])).toBeNull(); // MSP_REBOOT
+    expect(decodeDumpSections([{ command: 250, payloadHex: "" }])).toBeNull(); // MSP_EEPROM_WRITE
   });
 });

@@ -70,10 +70,17 @@ function FILTER_BOUNDS(key: string): [number, number] {
 }
 
 function ADVANCED_BOUNDS(key: string): [number, number] {
+  // BF 4.5 settings.c ranges — the clamp is the only guard between a rule
+  // and the wire, so keep these faithful to the firmware.
   if (key === "tpaBreakpoint") return [1000, 2000];
   if (key === "tpaMode") return [0, 1];
+  if (key === "tpaRate") return [0, 100]; // TPA_MAX
+  if (key === "dMaxGain") return [0, 100];
+  if (key === "dMaxAdvance") return [0, 200];
   if (key === "antiGravityGain") return [0, 30000];
   if (key === "idleMinRpm") return [0, 200]; // RPM/100
+  // Per-axis feedforward gains: F_GAIN_MAX (u16 on the wire).
+  if (key === "feedforwardRoll" || key === "feedforwardPitch" || key === "feedforwardYaw") return [0, 1000];
   return [0, 255];
 }
 
@@ -197,7 +204,6 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
   };
 
   const baseFilters = effectiveBase.filters!;
-  const baseAdvanced = effectiveBase.advanced!;
   const rpmActive = metrics.rpmFilterActive;
 
   // ------------------------------------------------------------------
@@ -493,7 +499,11 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
 
     // Optional step fields are absent in pre-overhaul persisted analyses.
     const ringing = sr.ringingCycles ?? 0;
+    // Track under-damped axes so the FF end-overshoot rule below doesn't
+    // co-fire a contradictory change for what may be the same symptom.
+    let dampingIssue = false;
     if (sr.overshootPercent > 25 || ringing >= 2) {
+      dampingIssue = true;
       // Under-damped. D is the shock absorber — raise it first; only cut P
       // when D is already near the top of the healthy D/P band (0.45–0.85).
       const p = basePid.p ?? 0;
@@ -574,18 +584,31 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
       );
     }
     if (sr.ffEndOvershootPercent != null && sr.ffEndOvershootPercent > 20) {
-      add(
-        {
+      if (dampingIssue) {
+        // Same physical symptom can explain both findings — don't co-fire a
+        // contradictory FF cut on top of the D/P change. Fix damping first,
+        // then re-evaluate from the next log.
+        add({
           id: `ff-end-${axis}`,
           severity: "warning",
           title: `${label} overshoots at the end of moves (${sr.ffEndOvershootPercent.toFixed(0)}%)`,
           detail:
-            "When the stick returns, the gyro sails past the setpoint and bounces back — feedforward keeps pushing when it should let go.",
-        },
-        { advanced: { [`feedforward${label}`]: -10 } },
-        "Reduce feedforward until the gyro returns cleanly onto the setpoint at the end of sharp moves.",
-        0.65,
-      );
+            "When the stick returns, the gyro sails past the setpoint and bounces back. This can be the same under-damping flagged above — fix the D/P balance first, then re-check before touching feedforward.",
+        });
+      } else {
+        add(
+          {
+            id: `ff-end-${axis}`,
+            severity: "warning",
+            title: `${label} overshoots at the end of moves (${sr.ffEndOvershootPercent.toFixed(0)}%)`,
+            detail:
+              "When the stick returns, the gyro sails past the setpoint and bounces back — feedforward keeps pushing when it should let go.",
+          },
+          { advanced: { [`feedforward${label}`]: -10 } },
+          "Reduce feedforward until the gyro returns cleanly onto the setpoint at the end of sharp moves.",
+          0.65,
+        );
+      }
     }
   }
 

@@ -20,14 +20,16 @@ COPY client/package.json client/package.json
 RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
   pnpm install --frozen-lockfile
 
-# ---------- build: compile the client bundle (server runs from TS source via tsx) ----------
+# ---------- build: typecheck + test everything, then compile the client bundle ----------
 FROM deps AS build
 COPY tsconfig.base.json ./
 COPY shared/ shared/
 COPY server/ server/
 COPY client/ client/
 
-RUN pnpm -C client build
+# Gate the image on the same checks CI runs (the server ships as TS source
+# run via tsx, so an image build is where type errors would otherwise hide).
+RUN pnpm typecheck && pnpm test && pnpm -C client build
 
 # ---------- runtime ----------
 FROM node:20-bookworm-slim AS runtime

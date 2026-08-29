@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { ConfigSection, DiffEntry, FcDump, Profile, ProfileSettings } from "@dronetuner/shared";
+import { RATES_TYPE_NAMES } from "@dronetuner/shared";
 import { diffConfig } from "@dronetuner/shared/tuning";
 import { apiGet, apiPost } from "@/lib/api";
 import { useApplyStore } from "@/lib/apply-store";
@@ -42,6 +43,18 @@ export default function ApplyFlow() {
   }, [payload, profileQuery.data]);
 
   const connected = !!msp.config;
+
+  // Rate values are meaningless without their curve convention (rates_type).
+  // A profile that declares it writes the type along with the values (shown
+  // in the diff); one that doesn't gets this loud warning instead.
+  const ratesConventionWarning = useMemo(() => {
+    if (!targetSettings?.rates || !msp.config) return null;
+    const rateKeys = Object.keys(targetSettings.rates).filter((k) => k !== "ratesType");
+    if (rateKeys.length === 0 || targetSettings.rates.ratesType !== undefined) return null;
+    const fcType = msp.config.rates.ratesType;
+    const fcName = (fcType !== undefined && RATES_TYPE_NAMES[fcType]) || "unknown";
+    return `This profile sets rates but doesn't declare a rates type — the values will be interpreted under the FC's current convention (${fcName}).`;
+  }, [targetSettings, msp.config]);
 
   const reset = () => {
     setStep("connect");
@@ -154,6 +167,7 @@ export default function ApplyFlow() {
         {connected && step === "review" && (
           <div className="space-y-3">
             <DiffView diff={diff} />
+            {ratesConventionWarning && <p className="text-xs text-amber-500">{ratesConventionWarning}</p>}
             {payload?.cliOnlyStripped && payload.cliOnlyStripped.length > 0 && (
               <p className="text-xs text-muted-foreground">
                 Not MSP-writable on BF 4.4/4.5, excluded from this apply:{" "}

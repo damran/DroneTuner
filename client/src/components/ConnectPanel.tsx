@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { Camera, Plug, RefreshCw, Unplug } from "lucide-react";
+import { RATES_TYPE, RATES_TYPE_NAMES } from "@dronetuner/shared";
+import { formatSettingValue } from "@dronetuner/shared/tuning";
 import { apiPost } from "@/lib/api";
-import { formatFeedforward, formatRate } from "@/lib/format";
+import { formatFeedforward } from "@/lib/format";
 import { isSerialSupported, useMspStore } from "@/lib/msp";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -125,12 +127,25 @@ export default function ConnectPanel({ droneId }: { droneId: number }) {
           </div>
 
           <div>
-            <h4 className="mb-1 text-sm font-semibold">Rates</h4>
+            <h4 className="mb-1 text-sm font-semibold">
+              Rates
+              {config.rates.ratesType !== undefined && (
+                <span className="ml-2 text-xs font-normal text-muted-foreground">
+                  {RATES_TYPE_NAMES[config.rates.ratesType] ?? `type ${config.rates.ratesType}`}
+                </span>
+              )}
+            </h4>
             <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-3">
-              <FilterRow label="RC rate" value={formatRate(config.rates.rcRate)} />
-              <FilterRow label="RC expo" value={formatRate(config.rates.rcExpo)} />
-              <FilterRow label="Super rate" value={formatRate(config.rates.rollRate)} />
-              <FilterRow label="Throttle mid" value={formatRate(config.rates.thrMid)} />
+              <FilterRow
+                label={config.rates.ratesType === RATES_TYPE.ACTUAL ? "Center sens (roll)" : "RC rate"}
+                value={rateValue("rcRate", config.rates.rcRate, config.rates.ratesType)}
+              />
+              <FilterRow label="RC expo" value={rateValue("rcExpo", config.rates.rcExpo, config.rates.ratesType)} />
+              <FilterRow
+                label={config.rates.ratesType === RATES_TYPE.ACTUAL ? "Max rate (roll)" : "Super rate"}
+                value={rateValue("rollRate", config.rates.rollRate, config.rates.ratesType)}
+              />
+              <FilterRow label="Throttle mid" value={rateValue("thrMid", config.rates.thrMid, config.rates.ratesType)} />
               <FilterRow label="FF roll" value={formatFeedforward(config.advanced.feedforwardRoll)} />
             </div>
           </div>
@@ -142,6 +157,11 @@ export default function ConnectPanel({ droneId }: { droneId: number }) {
 
 function formatHzValue(v: number | undefined): string | undefined {
   return v === undefined ? undefined : `${v} Hz`;
+}
+
+/** Convention-aware rate display (ACTUAL rates show deg/s, legacy show ×100). */
+function rateValue(key: string, v: number | undefined, ratesType: number | undefined): string | undefined {
+  return v === undefined ? undefined : formatSettingValue(`rates.${key}`, v, ratesType);
 }
 
 function formatHzRange(min: number | undefined, max: number | undefined, count?: number): string | undefined {

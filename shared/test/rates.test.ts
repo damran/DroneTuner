@@ -48,6 +48,7 @@ function makeLog(opts: {
     looptimeUs: 1000,
     gyroScale: opts.gyro ? 1 : null, // gyroScale 1 → gyro values are already deg/s
     firmware: "Betaflight",
+    truncated: false,
     warnings: [],
   };
 }
@@ -334,6 +335,9 @@ describe("recommendRates", () => {
   it("maps recommendations to MSP ints", () => {
     const rec = recommendRates(null, "freestyle", "65mm");
     expect(rec.settings.rates).toEqual({
+      // Actual-rates convention: the values are deg/s ÷ 10 and the type
+      // travels with them so MSP/CLI writes set the right curve family.
+      ratesType: 3,
       rcRate: 22,
       rcExpo: 55,
       rollRate: 100,
@@ -344,6 +348,7 @@ describe("recommendRates", () => {
       rcExpoYaw: 45,
       yawRate: 75,
     });
+    expect(rec.cliBlock).toContain("set rates_type = ACTUAL");
   });
 
   it("clamps extreme measured usage to 1.2x the baseline max", () => {

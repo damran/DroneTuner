@@ -29,7 +29,7 @@ describe("settingsToCli", () => {
     expect(text).toContain("set roll_rc_rate = 7");
     expect(text).toContain("set roll_srate = 67");
     expect(text).toContain("set iterm_relax = RPY");
-    expect(text).toContain("set tpa_mode = PD");
+    expect(text).toContain("set tpa_mode = D"); // tpaMode 1 = D-only (BF lookupTableTpaMode: PD=0, D=1)
     expect(text).toContain("set tpa_rate = 60");
   });
 
@@ -37,6 +37,12 @@ describe("settingsToCli", () => {
     const lines = settingsToCli({ filters: { rpmFilterWeight1: 100, rpmFilterWeight2: 0, rpmFilterWeight3: 80 } });
     expect(lines).toContain("set rpm_filter_weights = 100,0,80");
     expect(lines.find((l) => l.includes("rpmFilterWeight"))).toBeUndefined();
+  });
+
+  it("emits rates_type as its enum name", () => {
+    const lines = settingsToCli({ rates: { ratesType: 3, rcRate: 19, rollRate: 67 } });
+    expect(lines).toContain("set rates_type = ACTUAL");
+    expect(lines).toContain("set roll_rc_rate = 19");
   });
 
   it("emits nothing for empty settings", () => {

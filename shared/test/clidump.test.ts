@@ -33,11 +33,13 @@ set pitch_srate = 0.67
 set yaw_srate = 0.65
 set thr_mid = 0.50
 set thr_expo = 0.20
+set rates_type = ACTUAL
 set feedforward_roll = 95
 set feedforward_averaging = 2_POINT
 set feedforward_transition = 30
 set iterm_relax = RPY
 set iterm_relax_cutoff = 15
+set tpa_mode = D
 set tpa_rate = 65
 set tpa_breakpoint = 1350
 set motor_pwm_protocol = DSHOT300
@@ -66,12 +68,18 @@ describe("parseCliDump", () => {
     expect(settings.rates?.thrMid).toBe(50);
   });
 
+  it("parses rates_type as its enum index", () => {
+    const { settings } = parseCliDump(SAMPLE_DUMP);
+    expect(settings.rates?.ratesType).toBe(3); // ACTUAL
+  });
+
   it("maps CLI enum names to indexes", () => {
     const { settings } = parseCliDump(SAMPLE_DUMP);
     expect(settings.filters?.gyroLowpassType).toBe(0); // PT1
     expect(settings.filters?.dtermLowpassType).toBe(2); // PT2
     expect(settings.advanced?.itermRelax).toBe(2); // RPY
     expect(settings.advanced?.feedforwardAveraging).toBe(1); // 2_POINT
+    expect(settings.advanced?.tpaMode).toBe(1); // D (BF lookupTableTpaMode: PD=0, D=1)
   });
 
   it("extracts metadata from the dump header", () => {

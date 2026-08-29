@@ -184,7 +184,22 @@ describe("runRules", () => {
     const lag = out.recommendations.find((r) => r.findingId === "ff-lag-pitch");
     expect(lag!.changes.advanced?.feedforwardPitch).toBe(10);
     expect(lag!.cliLines?.join("\n")).toContain("set f_pitch = 135"); // default 125 + 10
+  });
 
+  it("does not co-fire an FF cut on an axis already flagged under-damped", () => {
+    // Overshoot during the step AND overshoot at move end can be the same
+    // physical symptom — the D/P fix goes first, FF is re-evaluated after.
+    const m = baseMetrics({
+      stepResponse: [step("roll", { overshootPercent: 40, ffEndOvershootPercent: 35 })],
+    });
+    const out = runRules(m, "freestyle");
+    expect(out.recommendations.some((r) => r.findingId === "overshoot-roll")).toBe(true);
+    expect(out.recommendations.some((r) => r.findingId === "ff-end-roll")).toBe(false);
+    // …but the finding is still reported.
+    expect(out.findings.some((f) => f.id === "ff-end-roll")).toBe(true);
+  });
+
+  it("lowers feedforward on end-of-move overshoot", () => {
     const m2 = baseMetrics({
       stepResponse: [step("pitch", { ffEndOvershootPercent: 35 })],
     });

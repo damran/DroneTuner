@@ -21,12 +21,6 @@ export function formatDateTime(ms: number | null | undefined): string {
   });
 }
 
-/** Raw MSP rate value (x100) to display, e.g. 110 -> "1.10" */
-export function formatRate(v: number | null | undefined): string {
-  if (v == null) return "—";
-  return (v / 100).toFixed(2);
-}
-
 /** Raw feedforward value, displayed as an integer like Betaflight does. */
 export function formatFeedforward(v: number | null | undefined): string {
   if (v == null) return "—";

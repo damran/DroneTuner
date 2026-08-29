@@ -242,6 +242,9 @@ export default function BaselinePanel({ drone }: { drone: DroneDetail }) {
                 Connect a flight controller (Connect tab) to diff against the baseline.
               </span>
             )}
+            {runCompare.isError && (
+              <span className="text-xs text-destructive">{(runCompare.error as Error).message}</span>
+            )}
           </div>
 
           {compare && (

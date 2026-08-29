@@ -1,9 +1,5 @@
-import type { ConfigSection, FcConfig, PidTerms, ProfileSettings } from "@dronetuner/shared";
+import type { ConfigSection, FcConfig, FcDumpSection, PidTerms, ProfileSettings } from "@dronetuner/shared";
 import {
-  MSP_API_VERSION,
-  MSP_FC_VARIANT,
-  MSP_FC_VERSION,
-  MSP_FEATURE_CONFIG,
   MSP_FILTER_CONFIG,
   MSP_PID,
   MSP_PID_ADVANCED,
@@ -13,6 +9,7 @@ import {
   MSP_SET_PID_ADVANCED,
   MSP_SET_RC_TUNING,
 } from "./commands";
+import { fromHex } from "./codec";
 
 export interface FieldDef {
   offset: number;
@@ -61,6 +58,11 @@ export const RATE_FIELDS: Record<string, FieldDef> = {
   rcRateYaw: { offset: 11, size: 1 },
   rcRatePitch: { offset: 12, size: 1 },
   rcExpoPitch: { offset: 13, size: 1 },
+  // offsets 14/15: throttle limit type/percent; 16–21: per-axis rate_limit
+  // u16 (unmanaged, preserved by patchPayload). rates_type follows at 22
+  // (verified against BF 4.5 msp.c; MSP_SET_RC_TUNING reads it when the
+  // payload is ≥23 bytes, which the 1.45/1.46 read always is).
+  ratesType: { offset: 22, size: 1 },
 };
 
 export const ADVANCED_FIELDS: Record<string, FieldDef> = {
@@ -253,6 +255,42 @@ export function readU32(payload: Uint8Array): number {
 export function isWritableApi(apiVersion: string): boolean {
   const [major, minor] = apiVersion.split(".").map((n) => Number.parseInt(n, 10));
   return major === 1 && (minor === 45 || minor === 46);
+}
+
+/** The only MSP commands a stored snapshot may replay (the four tuning writes). */
+export const RESTORABLE_COMMANDS: ReadonlySet<number> = new Set(Object.values(SET_COMMANDS));
+
+/**
+ * Decode a snapshot's raw section payloads into profile settings. The restore
+ * confirm diff is built from THIS — the actual bytes that will be replayed —
+ * never from the snapshot's free-form `decoded` field, so what the user
+ * confirms is exactly what gets written. Returns null when a section uses an
+ * unknown command (nothing honest to diff).
+ */
+export function decodeDumpSections(sections: FcDumpSection[]): ProfileSettings | null {
+  const settings: ProfileSettings = {};
+  for (const section of sections) {
+    if (!RESTORABLE_COMMANDS.has(section.command)) return null;
+    if (!section.payloadHex) continue;
+    const payload = fromHex(section.payloadHex);
+    switch (section.command) {
+      case MSP_SET_PID: {
+        const pid = decodePid(payload);
+        settings.pids = { roll: pid.roll, pitch: pid.pitch, yaw: pid.yaw };
+        break;
+      }
+      case MSP_SET_FILTER_CONFIG:
+        settings.filters = decodeSection(payload, FILTER_FIELDS);
+        break;
+      case MSP_SET_RC_TUNING:
+        settings.rates = decodeSection(payload, RATE_FIELDS);
+        break;
+      case MSP_SET_PID_ADVANCED:
+        settings.advanced = decodeSection(payload, ADVANCED_FIELDS);
+        break;
+    }
+  }
+  return settings;
 }
 
 /** Merge target profile settings into the current config for one section. */

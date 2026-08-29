@@ -1,8 +1,8 @@
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { Camera, Star, Trash2, Upload } from "lucide-react";
-import type { Component, ComponentCategory, DroneDetail, Flight, Profile } from "@dronetuner/shared";
+import { Star, Trash2, Upload } from "lucide-react";
+import type { Component, ComponentCategory, DroneDetail, Flight } from "@dronetuner/shared";
 import { COMPONENT_CATEGORIES, COMPONENT_CATEGORY_LABELS, FLIGHT_STYLE_TAGS } from "@dronetuner/shared";
 import { apiDelete, apiGet, apiPatch, apiPost, photoUrl } from "@/lib/api";
 import { formatDate, formatDuration } from "@/lib/format";
@@ -21,6 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import ConnectPanel from "@/components/ConnectPanel";
+import SnapshotsPanel from "@/components/SnapshotsPanel";
 import BaselinePanel from "@/components/BaselinePanel";
 import ProfilesList from "@/components/ProfilesList";
 
@@ -105,7 +106,10 @@ export default function DroneDetailPage() {
         </TabsContent>
 
         <TabsContent value="connect">
-          <ConnectPanel droneId={droneId} />
+          <div className="space-y-4">
+            <ConnectPanel droneId={droneId} />
+            <SnapshotsPanel droneId={droneId} />
+          </div>
         </TabsContent>
       </Tabs>
     </div>
@@ -242,16 +246,18 @@ function PhotoGallery({ droneId, photos }: { droneId: number; photos: DroneDetai
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const upload = async (files: FileList) => {
     setBusy(true);
+    setUploadError(null);
     try {
       const form = new FormData();
       for (const f of Array.from(files)) form.append("files", f);
       const res = await fetch(`/api/drones/${droneId}/photos`, { method: "POST", body: form });
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
-        alert(body?.error ?? `Photo upload failed (${res.status})`);
+        setUploadError(body?.error ?? `Photo upload failed (${res.status})`);
         return;
       }
       void qc.invalidateQueries({ queryKey: ["drone", droneId] });
@@ -280,6 +286,7 @@ function PhotoGallery({ droneId, photos }: { droneId: number; photos: DroneDetai
         </div>
       </CardHeader>
       <CardContent>
+        {uploadError && <p className="mb-2 text-sm text-destructive">{uploadError}</p>}
         {photos.length === 0 ? (
           <p className="text-sm text-muted-foreground">No photos yet.</p>
         ) : (

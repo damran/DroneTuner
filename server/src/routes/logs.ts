@@ -82,7 +82,7 @@ export default async function logsRoutes(app: FastifyInstance, opts: { ctx: AppC
       return reply.code(404).send({ error: "Drone not found" });
     }
 
-    let headers: Record<string, string> | null = null;
+    let headers: Record<string, string> | null;
     try {
       const fullPath = path.join(config.logsDir, savedPath);
       const fd = fs.openSync(fullPath, "r");

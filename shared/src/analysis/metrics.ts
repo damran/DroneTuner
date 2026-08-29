@@ -12,6 +12,22 @@ function channel(log: ParsedLog, name: string): Float32Array | undefined {
   return log.channels[name];
 }
 
+/**
+ * The log's throttle channel: rcCommand[3] (1000–2000) with setpoint[3]
+ * (~0–1000) as fallback. Shared by the metrics pipeline and the Log Lab
+ * worker so traces and findings always describe the same signal.
+ */
+export function throttleChannel(log: ParsedLog): Float32Array | undefined {
+  return channel(log, "rcCommand[3]") ?? channel(log, "setpoint[3]");
+}
+
+/** Gyro channel for an axis, scaled to deg/s when the log carries a gyroScale. */
+export function scaledGyroChannel(log: ParsedLog, axisIndex: number): Float32Array | undefined {
+  const raw = channel(log, `gyroADC[${axisIndex}]`);
+  if (!raw) return undefined;
+  return log.gyroScale ? raw.map((v) => v * log.gyroScale!) : raw;
+}
+
 function sampleRateOf(log: ParsedLog): number {
   const t = log.timeUs;
   if (t.length < 8) return 0;
@@ -96,9 +112,8 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
   const frameCount = log.frameCount;
   const durationS = log.timeUs.length > 1 ? (log.timeUs[log.timeUs.length - 1]! - log.timeUs[0]!) / 1e6 : 0;
 
-  const gyroScale = log.gyroScale ?? null;
   const mask = airborneMask(log);
-  const throttle = channel(log, "rcCommand[3]") ?? channel(log, "setpoint[3]");
+  const throttle = throttleChannel(log);
   const erpmHz = meanErpmHzChannel(log);
 
   const noisePeaks: NoisePeak[] = [];
@@ -133,9 +148,8 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
 
   for (const axis of AXES) {
     const idx = AXIS_INDEX[axis];
-    const gyroRaw = channel(log, `gyroADC[${idx}]`);
-    if (gyroRaw && gyroRaw.length > 256 && sampleRate > 0) {
-      const gyro = gyroScale ? gyroRaw.map((v) => v * gyroScale) : gyroRaw;
+    const gyro = scaledGyroChannel(log, idx);
+    if (gyro && gyro.length > 256 && sampleRate > 0) {
       // Time–frequency analysis over airborne windows: frame resonances are
       // throttle-independent (vertical stripes), motor harmonics sweep with
       // throttle (diagonal ridges) — the classification drives which filter
@@ -194,15 +208,21 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
     motorSaturationPercent = airborneFrames > 0 ? (sat / airborneFrames) * 100 : 0;
   }
 
-  // Throttle
+  // Throttle average over airborne frames only — idle/ground time would skew it.
   let throttleAvg = 0;
   if (throttle && throttle.length > 0) {
     let sum = 0;
-    for (let i = 0; i < throttle.length; i++) sum += throttle[i]!;
-    throttleAvg = sum / throttle.length;
+    let n = 0;
+    for (let i = 0; i < throttle.length; i++) {
+      if (mask && (i >= mask.length || !mask[i])) continue;
+      sum += throttle[i]!;
+      n++;
+    }
+    throttleAvg = n > 0 ? sum / n : 0;
   }
 
-  // Battery
+  // Battery — blackbox logs vbatLatest in centivolts (0.01 V units, same
+  // scale as the vbatref/vbatcellvoltage headers), so /100 for volts.
   const vbat = channel(log, "vbatLatest");
   let vbatMinV: number | null = null;
   let vbatAvgV: number | null = null;
@@ -211,27 +231,34 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
     let min = Infinity;
     let sum = 0;
     for (let i = 0; i < vbat.length; i++) {
-      const v = vbat[i]! / 10;
+      const v = vbat[i]! / 100;
       if (v < min) min = v;
       sum += v;
     }
     vbatMinV = min;
     vbatAvgV = sum / vbat.length;
 
-    // sag: high-throttle vs low-throttle voltage
-    if (throttle && throttle.length > 0) {
-      const loaded: number[] = [];
-      const rest: number[] = [];
-      const n = Math.min(vbat.length, throttle.length);
-      for (let i = 0; i < n; i++) {
-        const v = vbat[i]! / 10;
-        if (throttle[i]! > 1500) loaded.push(v);
-        else rest.push(v);
-      }
-      if (loaded.length > 32 && rest.length > 32) {
-        const restV = median(rest);
-        const loadedV = median(loaded);
-        vbatSagV = Math.max(0, restV - loadedV);
+    // Sag: loaded vs resting voltage, split by THIS log's airborne throttle
+    // quartiles — scale-independent, so it works whether the throttle channel
+    // is rcCommand (1000–2000) or setpoint[3] (~0–1000).
+    if (throttle && mask) {
+      const quartiles = throttleQuartiles(throttle, mask);
+      if (quartiles) {
+        const loaded: number[] = [];
+        const rest: number[] = [];
+        const n = Math.min(vbat.length, throttle.length, mask.length);
+        for (let i = 0; i < n; i++) {
+          if (!mask[i]) continue;
+          const t = throttle[i]!;
+          const v = vbat[i]! / 100;
+          if (t >= quartiles.q3) loaded.push(v);
+          else if (t <= quartiles.q1) rest.push(v);
+        }
+        if (loaded.length > 32 && rest.length > 32) {
+          const restV = median(rest);
+          const loadedV = median(loaded);
+          vbatSagV = Math.max(0, restV - loadedV);
+        }
       }
     }
   }
@@ -244,10 +271,13 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
     filterLatencyMs = Math.round(median(rises) / 2);
   }
 
+  // Blackbox logs these headers as integers (e.g. dshot_bidir:1,
+  // debug_mode:6) — DEBUG_RPM_FILTER is enum value 6 in BF's build/debug.h.
+  const debugMode = Number.parseInt(log.headers["debug_mode"] ?? "", 10);
   const rpmFilterActive =
     channel(log, "eRPM[0]") !== undefined ||
-    log.headers["dshot_bidir"] === "ON" ||
-    log.headers["debug_mode"] === "RPM_FILTER";
+    log.headers["dshot_bidir"] === "1" ||
+    debugMode === 6;
 
   // Gyro/PID rates from headers: the blackbox `looptime` header is the gyro
   // task period (µs); the PID loop runs at gyro / pid_process_denom.

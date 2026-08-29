@@ -37,4 +37,29 @@ describe("diffConfig", () => {
     const result = diffConfig(current, { rates: { rcRate: 110 } });
     expect(result.diff[0]!.toDisplay).toBe("1.10");
   });
+
+  it("formats rates_type as its enum name", () => {
+    const fc: FcConfig = { ...current, rates: { ...current.rates, ratesType: 3 } };
+    const result = diffConfig(fc, { rates: { ratesType: 0, rcRate: 100 } });
+    const typeRow = result.diff.find((d) => d.path === "rates.ratesType");
+    expect(typeRow?.fromDisplay).toBe("ACTUAL");
+    expect(typeRow?.toDisplay).toBe("BETAFLIGHT");
+  });
+
+  it("formats ACTUAL-convention rate values as deg/s", () => {
+    // FC on ACTUAL (rates_type 3): rcRate 19 means 190 °/s center sensitivity.
+    const fc: FcConfig = { ...current, rates: { rcRate: 19, rollRate: 67, ratesType: 3 } };
+    const result = diffConfig(fc, { rates: { rcRate: 22, ratesType: 3 } });
+    const row = result.diff.find((d) => d.path === "rates.rcRate");
+    expect(row?.fromDisplay).toBe("190 °/s");
+    expect(row?.toDisplay).toBe("220 °/s");
+  });
+
+  it("formats each side under its own convention when the type switches", () => {
+    const fc: FcConfig = { ...current, rates: { rcRate: 19, ratesType: 3 } };
+    const result = diffConfig(fc, { rates: { ratesType: 0, rcRate: 100 } });
+    const row = result.diff.find((d) => d.path === "rates.rcRate");
+    expect(row?.fromDisplay).toBe("190 °/s"); // FC side: ACTUAL
+    expect(row?.toDisplay).toBe("1.00"); // profile side: BETAFLIGHT
+  });
 });

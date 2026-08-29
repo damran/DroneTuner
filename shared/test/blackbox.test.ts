@@ -274,4 +274,38 @@ describe("blackbox parser", () => {
   it("rejects non-blackbox data", () => {
     expect(() => parseBlackboxLog(new Uint8Array([1, 2, 3, 4, 5]))).toThrow();
   });
+
+  it("records truncation at the maxFrames cap", () => {
+    const parsed = parseBlackboxLog(buildLog(), { maxFrames: 2 });
+    expect(parsed.frameCount).toBe(2);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.warnings.some((w) => w.includes("truncated"))).toBe(true);
+  });
+
+  it("is not truncated when the log fits under the cap", () => {
+    const parsed = parseBlackboxLog(buildLog());
+    expect(parsed.truncated).toBe(false);
+  });
+
+  it("surfaces unsupported encodings as warnings instead of swallowing them", () => {
+    // Corrupt the P-frame encoding table: field 1 (time, predictor
+    // STRAIGHT_LINE) gets encoding 99. Field 0 would not exercise it — its
+    // P_INC predictor never consults the encoding table.
+    const parts = P_ENCODING.split(",");
+    parts[1] = "99";
+    const bad = header().replace(`H Field P encoding:${P_ENCODING}`, `H Field P encoding:${parts.join(",")}`);
+    const out: number[] = [];
+    for (const ch of bad) out.push(ch.charCodeAt(0));
+    const f0: MainFrame = {
+      loopIteration: 0, time: 0,
+      axisP: [45, 47, 80], axisI: [90, 90, 100], axisD: [40, 40, 0], axisF: [120, 120, 120],
+      rcCommand: [1500, 1500, 1500, 1000], setpoint: [0, 0, 0, 0],
+      vbatLatest: 1250, amperageLatest: 100, rssi: 50,
+      gyroADC: [100, -50, 20], motor: [1100, 1100, 1100, 1100],
+    };
+    encodeIFrame(out, f0);
+    encodePFrame(out, f0, f0, f0); // triggers the corrupted P encoding
+    const parsed = parseBlackboxLog(new Uint8Array(out));
+    expect(parsed.warnings.some((w) => w.includes("Unsupported field encoding 99"))).toBe(true);
+  });
 });

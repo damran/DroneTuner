@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { Analysis, DroneSummary, FlightLog, Profile, ProfileSettings, TuneGoal } from "@dronetuner/shared";
 import { TUNE_GOALS, TUNE_GOAL_LABELS } from "@dronetuner/shared";
-import { applyChanges, cliOnlyKeys, runRules, settingsToCli } from "@dronetuner/shared/tuning";
+import { applyChanges, cliOnlyKeys, formatSettingValue, runRules, settingLabel, settingsToCli } from "@dronetuner/shared/tuning";
 import { estimateFilterDelay, filterConfigFromProfile } from "@dronetuner/shared/analysis";
 import { apiGet, apiPost } from "@/lib/api";
 import { useApplyStore } from "@/lib/apply-store";
@@ -24,7 +24,8 @@ export default function WizardPage() {
   const [goal, setGoal] = useState<TuneGoal>("freestyle");
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
-  // Nothing is applied by default: the user opts into each recommendation.
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // Recommendations are opt-in: none is folded into the draft until ticked.
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const start = useApplyStore((s) => s.start);
 
@@ -67,11 +68,16 @@ export default function WizardPage() {
     return runRules(analysis.metrics, goal, template?.settings).recommendations;
   }, [analysis, goal, template]);
 
-  // Reset the selection when the underlying analysis/goal/template changes.
+  // Reset the selection when the underlying drone/goal/template/analysis
+  // changes. Recommendation ids are positional (rec-1, rec-2, …), so the key
+  // must include the analysis identity — otherwise a re-analyzed log with the
+  // same recommendation count would keep stale ticks that now fold DIFFERENT
+  // recommendations into the draft.
   const recKey = recommendations.map((r) => r.id).join("|");
-  const [prevRecKey, setPrevRecKey] = useState(recKey);
-  if (recKey !== prevRecKey) {
-    setPrevRecKey(recKey);
+  const contextKey = `${droneId}|${goal}|${template?.id ?? "none"}|${latestLogId ?? "none"}|${recKey}`;
+  const [prevContextKey, setPrevContextKey] = useState(contextKey);
+  if (contextKey !== prevContextKey) {
+    setPrevContextKey(contextKey);
     setSelected(new Set());
   }
 
@@ -93,6 +99,18 @@ export default function WizardPage() {
     return settings;
   }, [template, recommendations, selected]);
 
+  // …and reset the action-button state whenever the draft CONTENT changes
+  // (including ticking a recommendation) — "Saved"/"Copied" must not linger
+  // on a draft they no longer describe.
+  const draftContentKey = JSON.stringify(draftSettings);
+  const [prevContentKey, setPrevContentKey] = useState(draftContentKey);
+  if (draftContentKey !== prevContentKey) {
+    setPrevContentKey(draftContentKey);
+    setSaved(false);
+    setCopied(false);
+    setSaveError(null);
+  }
+
   // Predicted filter delay of the draft (BF 4.5 defaults fill the gaps).
   const draftDelay = useMemo(() => {
     if (!draftSettings) return null;
@@ -104,19 +122,25 @@ export default function WizardPage() {
   const copyCli = async (lines: string[], done: () => void) => {
     await navigator.clipboard.writeText(lines.join("\n") + "\nsave\n");
     done();
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const saveDraft = async () => {
     if (!draftSettings || !drone) return;
-    await apiPost("/api/profiles", {
-      name: `${drone.name} ${TUNE_GOAL_LABELS[goal]}`,
-      goal,
-      sizeClass: drone.sizeClass,
-      droneId: drone.id,
-      settings: draftSettings,
-      source: "generated",
-    });
-    setSaved(true);
+    setSaveError(null);
+    try {
+      await apiPost("/api/profiles", {
+        name: `${drone.name} ${TUNE_GOAL_LABELS[goal]}`,
+        goal,
+        sizeClass: drone.sizeClass,
+        droneId: drone.id,
+        settings: draftSettings,
+        source: "generated",
+      });
+      setSaved(true);
+    } catch (e) {
+      setSaveError(String(e instanceof Error ? e.message : e));
+    }
   };
 
   return (
@@ -124,8 +148,9 @@ export default function WizardPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-semibold">Tuning Wizard</h1>
         <p className="text-sm text-muted-foreground">
-          Pick a drone and goal, start from a baseline template, then choose which analysis-driven
-          recommendations to include — nothing is applied unless you select it.
+          Pick a drone and goal to draft from a baseline template, then tick the analysis-driven
+          recommendations to fold in. Applying writes the whole draft — baseline plus everything you
+          ticked — through the confirm-gated review flow.
         </p>
       </div>
 
@@ -299,9 +324,11 @@ export default function WizardPage() {
                     {saved ? "Saved" : "Save as generated profile"}
                   </Button>
                 </div>
+                {saveError && <p className="mt-2 text-sm text-destructive">{saveError}</p>}
                 <p className="mt-2 text-xs text-muted-foreground">
-                  Apply goes through snapshot → diff → confirm → EEPROM save. Copy CLI gives you the same
-                  config as Betaflight CLI commands to paste yourself.
+                  The draft is the full baseline template{selected.size > 0 ? ` plus ${selected.size} recommendation(s)` : ""} — apply goes
+                  through snapshot → diff → confirm → EEPROM save. Copy CLI gives you the same config as
+                  Betaflight CLI commands to paste yourself.
                 </p>
               </CardContent>
             </Card>
@@ -320,9 +347,20 @@ function SettingsTable({ settings }: { settings: ProfileSettings }) {
       if (p) rows.push({ label: `${axis} P/I/D`, value: `${p.p ?? "—"}/${p.i ?? "—"}/${p.d ?? "—"}` });
     }
   }
-  for (const [k, v] of Object.entries(settings.filters ?? {})) rows.push({ label: k, value: String(v) });
-  for (const [k, v] of Object.entries(settings.rates ?? {})) rows.push({ label: k, value: String(v) });
-  for (const [k, v] of Object.entries(settings.advanced ?? {})) rows.push({ label: k, value: String(v) });
+  // Human labels + display formatting shared with the apply-flow diff.
+  for (const [k, v] of Object.entries(settings.filters ?? {})) {
+    if (v === undefined) continue;
+    rows.push({ label: settingLabel("filters", k), value: formatSettingValue(`filters.${k}`, v) });
+  }
+  const ratesType = settings.rates?.ratesType;
+  for (const [k, v] of Object.entries(settings.rates ?? {})) {
+    if (v === undefined) continue;
+    rows.push({ label: settingLabel("rates", k), value: formatSettingValue(`rates.${k}`, v, ratesType) });
+  }
+  for (const [k, v] of Object.entries(settings.advanced ?? {})) {
+    if (v === undefined) continue;
+    rows.push({ label: settingLabel("advanced", k), value: formatSettingValue(`advanced.${k}`, v) });
+  }
 
   return (
     <Table>

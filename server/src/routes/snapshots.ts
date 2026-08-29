@@ -1,10 +1,17 @@
 import type { FastifyInstance } from "fastify";
 import { desc, eq } from "drizzle-orm";
 import { z } from "zod";
-import type { FcConfig, FcDump, FcSnapshot } from "@dronetuner/shared";
+import type { FcDump, FcSnapshot } from "@dronetuner/shared";
 import type { AppContext } from "../context";
 import { fcSnapshots } from "../db/schema";
-import { buildApplyPlan, fcConfigToSettings } from "../services/applyplan";
+
+/**
+ * Restore replays these payloads verbatim to the FC, so only the four tuning
+ * SET commands DroneTuner itself writes are storable — anything else (arming,
+ * feature, reboot, …) must never be replayed. Mirrors SET_COMMANDS in
+ * client/src/lib/msp/commands.ts; the MSP session re-checks at replay time.
+ */
+const RESTORABLE_COMMANDS = new Set([93, 95, 202, 204]);
 
 const createSchema = z.object({
   droneId: z.number().int().positive(),
@@ -13,7 +20,16 @@ const createSchema = z.object({
     fcVariant: z.string(),
     fcVersion: z.string(),
     capturedAt: z.number(),
-    sections: z.array(z.object({ command: z.number().int(), payloadHex: z.string() })),
+    sections: z.array(
+      z.object({
+        command: z
+          .number()
+          .int()
+          .refine((c) => RESTORABLE_COMMANDS.has(c), "command is not a restorable MSP SET command"),
+        // even-length hex, capped well above the largest managed payload (~64 bytes)
+        payloadHex: z.string().regex(/^([0-9a-fA-F]{2}){0,128}$/, "payloadHex must be even-length hex"),
+      }),
+    ),
     decoded: z.object({ pids: z.record(z.object({ p: z.number(), i: z.number(), d: z.number() })) }).passthrough(),
   }),
   reason: z.string().nullable().optional(),
@@ -58,34 +74,5 @@ export default async function snapshotsRoutes(app: FastifyInstance, opts: { ctx:
     const id = Number((req.params as { id: string }).id);
     await db.delete(fcSnapshots).where(eq(fcSnapshots.id, id));
     return reply.code(204).send();
-  });
-
-  app.post("/api/snapshots/:id/restore-plan", async (req, reply) => {
-    const id = Number((req.params as { id: string }).id);
-    const snapshot = await db.select().from(fcSnapshots).where(eq(fcSnapshots.id, id)).get();
-    if (!snapshot) return reply.code(404).send({ error: "Snapshot not found" });
-    const parsed = z
-      .object({
-        current: z
-          .object({
-            pids: z.record(z.object({ p: z.number(), i: z.number(), d: z.number() })),
-            filters: z.record(z.number()),
-            rates: z.record(z.number()),
-            advanced: z.record(z.number()),
-          })
-          .passthrough(),
-      })
-      .safeParse(req.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: "current FC config required (decoded pids/filters/rates/advanced)" });
-    }
-    const dump = snapshot.dumpJson as FcDump;
-    const plan = buildApplyPlan(parsed.data.current as unknown as FcConfig, fcConfigToSettings(dump.decoded));
-    return {
-      snapshotId: id,
-      diff: plan.diff,
-      sections: dump.sections,
-      upToDate: plan.upToDate,
-    };
   });
 }

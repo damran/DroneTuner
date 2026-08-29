@@ -46,6 +46,27 @@ describe("spectrogram peak classification", () => {
     expect(res.motorNoiseOnsetHz!).toBeLessThan(180);
   });
 
+  it("keeps a fixed resonance separate from a swept ridge crossing it", () => {
+    const n = FS * DURATION_S;
+    const gyro = new Float32Array(n);
+    const throttle = makeThrottle(n);
+    // Motor ridge sweeps 100→300 Hz with the throttle, crossing a fixed
+    // 230 Hz frame resonance. Single-linkage chaining alone would absorb the
+    // resonance into the ridge and misclassify it as motor noise.
+    let phase = 0;
+    for (let i = 0; i < n; i++) {
+      const f = 100 + 0.2 * (throttle[i]! - 1000);
+      phase += (2 * Math.PI * f) / FS;
+      gyro[i] = 8 * Math.sin(phase) + 5 * Math.sin((2 * Math.PI * 230 * i) / FS);
+    }
+    const sg = computeSpectrogram(gyro, FS, { throttle, windowSize: 1024 });
+    const res = classifyPeaks("roll", sg);
+    const fixed = res.peaks.find((p) => Math.abs(p.freqHz - 230) < 15);
+    expect(fixed).toBeDefined();
+    expect(fixed!.kind).toBe("frameResonance");
+    expect(res.peaks.some((p) => p.kind === "motorHarmonic")).toBe(true);
+  });
+
   it("reports no peaks on a quiet signal", () => {
     const n = FS * DURATION_S;
     const gyro = new Float32Array(n);

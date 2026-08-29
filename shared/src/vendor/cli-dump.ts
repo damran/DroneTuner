@@ -1,4 +1,6 @@
 import type { ProfileSettings } from "../types/fc";
+import { RATES_TYPE_NAMES } from "../types/fc";
+import { TPA_MODE_NAMES } from "../tuning/cli";
 
 /**
  * Parser for Betaflight CLI dumps (`dump` / `diff all` output) as published
@@ -6,6 +8,11 @@ import type { ProfileSettings } from "../types/fc";
  * Maps the CLI keys DroneTuner manages onto ProfileSettings; everything else
  * is reported in `ignored` so the caller can see what was skipped.
  */
+
+/** name → index map derived from a canonical BF lookup-name table. */
+function namesToEnum(names: readonly string[]): Record<string, number> {
+  return Object.fromEntries(names.map((n, i) => [n, i]));
+}
 
 export interface CliDumpMeta {
   boardName?: string;
@@ -93,29 +100,31 @@ const FILTER_KEYS: Record<string, { field: string; enum?: Record<string, number>
  * RC tuning keys. BF 4.3+ prints these as plain ints (deg/s ÷ 10 for rates,
  * ×100 for expo); pre-4.3 dumps may show 2-decimal floats — parseScaled
  * handles both. Both the modern per-axis names (`roll_rc_rate`, …) and the
- * legacy names (`rc_rate`, …) map onto the same MSP fields.
+ * legacy names (`rc_rate`, …) map onto the same MSP fields. `rates_type`
+ * carries the curve convention the values are authored under.
  */
-const RATE_KEYS: Record<string, string> = {
+const RATE_KEYS: Record<string, { field: string; enum?: Record<string, number> }> = {
   // BF 4.3+ per-axis names (used by current dumps and official presets)
-  roll_rc_rate: "rcRate",
-  pitch_rc_rate: "rcRatePitch",
-  yaw_rc_rate: "rcRateYaw",
-  roll_expo: "rcExpo",
-  pitch_expo: "rcExpoPitch",
-  yaw_expo: "rcExpoYaw",
+  roll_rc_rate: { field: "rcRate" },
+  pitch_rc_rate: { field: "rcRatePitch" },
+  yaw_rc_rate: { field: "rcRateYaw" },
+  roll_expo: { field: "rcExpo" },
+  pitch_expo: { field: "rcExpoPitch" },
+  yaw_expo: { field: "rcExpoYaw" },
   // legacy (pre-4.3) names
-  rc_rate: "rcRate",
-  rc_expo: "rcExpo",
-  rc_rate_pitch: "rcRatePitch",
-  rc_expo_pitch: "rcExpoPitch",
-  rc_rate_yaw: "rcRateYaw",
-  rc_expo_yaw: "rcExpoYaw",
+  rc_rate: { field: "rcRate" },
+  rc_expo: { field: "rcExpo" },
+  rc_rate_pitch: { field: "rcRatePitch" },
+  rc_expo_pitch: { field: "rcExpoPitch" },
+  rc_rate_yaw: { field: "rcRateYaw" },
+  rc_expo_yaw: { field: "rcExpoYaw" },
   // unchanged across versions
-  roll_srate: "rollRate",
-  pitch_srate: "pitchRate",
-  yaw_srate: "yawRate",
-  thr_mid: "thrMid",
-  thr_expo: "thrExpo",
+  roll_srate: { field: "rollRate" },
+  pitch_srate: { field: "pitchRate" },
+  yaw_srate: { field: "yawRate" },
+  thr_mid: { field: "thrMid" },
+  thr_expo: { field: "thrExpo" },
+  rates_type: { field: "ratesType", enum: namesToEnum(RATES_TYPE_NAMES) },
 };
 
 const ADVANCED_KEYS: Record<string, { field: string; enum?: Record<string, number> }> = {
@@ -141,7 +150,7 @@ const ADVANCED_KEYS: Record<string, { field: string; enum?: Record<string, numbe
   d_max_advance: { field: "dMaxAdvance" },
   thrust_linear: { field: "thrustLinear" },
   anti_gravity_gain: { field: "antiGravityGain" },
-  tpa_mode: { field: "tpaMode", enum: { PD: 1, D: 0 } },
+  tpa_mode: { field: "tpaMode", enum: namesToEnum(TPA_MODE_NAMES) },
   tpa_rate: { field: "tpaRate" },
   tpa_breakpoint: { field: "tpaBreakpoint" },
   vbat_sag_compensation: { field: "vbatSagCompensation" },
@@ -153,6 +162,13 @@ function parseScaled(raw: string): number | null {
   if (Number.isNaN(v)) return null;
   // CLI floats (e.g. "1.10") are stored ×100 in MSP; plain ints are used as-is.
   return raw.includes(".") ? Math.round(v * 100) : Math.round(v);
+}
+
+/** Enum lookup by CLI name, with a numeric fallback (`set tpa_mode = 1`). */
+function enumValue(map: Record<string, number>, raw: string): number | null {
+  const byName = map[raw.toUpperCase()];
+  if (byName !== undefined) return byName;
+  return parseInt(raw);
 }
 
 function parseInt(raw: string): number | null {
@@ -243,7 +259,7 @@ export function parseCliDump(input: string): CliDumpParseResult {
 
     const filter = FILTER_KEYS[key];
     if (filter) {
-      const v = filter.enum ? filter.enum[raw.toUpperCase()] : parseInt(raw);
+      const v = filter.enum ? enumValue(filter.enum, raw) : parseInt(raw);
       if (v === undefined || v === null) {
         ignored.push(key);
         continue;
@@ -253,21 +269,21 @@ export function parseCliDump(input: string): CliDumpParseResult {
       continue;
     }
 
-    const rateField = RATE_KEYS[key];
-    if (rateField) {
-      const v = parseScaled(raw);
-      if (v === null) {
+    const rate = RATE_KEYS[key];
+    if (rate) {
+      const v = rate.enum ? enumValue(rate.enum, raw) : parseScaled(raw);
+      if (v === undefined || v === null) {
         ignored.push(key);
         continue;
       }
-      settings.rates = { ...settings.rates, [rateField]: v };
+      settings.rates = { ...settings.rates, [rate.field]: v };
       recognized.push(key);
       continue;
     }
 
     const adv = ADVANCED_KEYS[key];
     if (adv) {
-      const v = adv.enum ? adv.enum[raw.toUpperCase()] : parseInt(raw);
+      const v = adv.enum ? enumValue(adv.enum, raw) : parseInt(raw);
       if (v === undefined || v === null) {
         ignored.push(key);
         continue;

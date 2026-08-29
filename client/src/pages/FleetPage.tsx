@@ -137,9 +137,12 @@ export default function FleetPage() {
               <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} />
             </div>
           </div>
+          {create.isError && (
+            <p className="text-sm text-destructive">{(create.error as Error).message}</p>
+          )}
           <DialogFooter>
             <Button onClick={() => create.mutate()} disabled={!name.trim() || create.isPending}>
-              Create
+              {create.isPending ? "Creating…" : "Create"}
             </Button>
           </DialogFooter>
         </DialogContent>

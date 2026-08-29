@@ -177,7 +177,7 @@ No Ollama? Everything else works — the chatbot simply stays offline.
 
 1. No MSP command that can arm is ever sent.
 2. Every write flow: full MSP snapshot (stored as a restore point) → diff of every changed value → **explicit user confirm** → apply → EEPROM save.
-3. Any snapshot is restorable with one click.
+3. Any snapshot is restorable from the drone's **Connect → Snapshots** panel — restore shows the same diff and confirm step, and is refused on a firmware variant/API mismatch.
 4. The AI copilot proposes action cards only — execution always goes through the same confirm flow.
 
 ## 📜 Scripts
@@ -185,9 +185,9 @@ No Ollama? Everything else works — the chatbot simply stays offline.
 | Command | What it does |
 |---|---|
 | `pnpm dev` | Run server (:3001) and client (:5173) together |
-| `pnpm seed` | Seed component library + profile templates |
+| `pnpm seed` | Seed component library + refresh profile templates |
 | `pnpm build` | Build the client bundle |
-| `pnpm test` / `pnpm typecheck` | Vitest suites / strict TS checks across workspaces |
+| `pnpm test` / `pnpm typecheck` / `pnpm lint` | Vitest suites / strict TS checks / ESLint across workspaces (CI runs all three) |
 | `pnpm smoke` | e2e API smoke script (server must be running) |
 
 ## 🧰 Tech stack

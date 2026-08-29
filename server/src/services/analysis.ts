@@ -22,6 +22,10 @@ export async function analyzeLog(ctx: AppContext, logId: number): Promise<Analyz
 
   const filePath = path.join(config.logsDir, log.filePath);
   const data = await fs.promises.readFile(filePath);
+  // Parse + metrics run synchronously on the Fastify event loop. That blocks
+  // other requests for the duration (a few hundred ms for a typical log) —
+  // acceptable for a single-user local app; move to a worker thread if that
+  // ever changes.
   const parsed = parseBlackboxLog(new Uint8Array(data));
   const metrics = computeMetrics(parsed);
   const { findings } = runRules(metrics, "freestyle");

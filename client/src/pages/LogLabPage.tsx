@@ -3,16 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { FileUp, Loader2 } from "lucide-react";
 import type { Analysis, DroneSummary, Flight, FlightLog } from "@dronetuner/shared";
-import { parseBlackboxLog } from "@dronetuner/shared/blackbox";
-import {
-  amplitudeSpectrum,
-  averageStepResponse,
-  compareAnalyses,
-  detectSteps,
-  findPeaks,
-  type AnalysisComparison,
-} from "@dronetuner/shared/analysis";
-import type { ParsedLog } from "@dronetuner/shared/blackbox";
+import { compareAnalyses, type AnalysisComparison } from "@dronetuner/shared/analysis";
+import type { SpectrumSeries, TracesResult, WorkerOut } from "@/lib/loglab/traces-worker";
 import { apiGet, apiPost } from "@/lib/api";
 import { formatDate, formatDuration, formatPercent, formatVolts } from "@/lib/format";
 import { EChart } from "@/components/charts/EChart";
@@ -30,7 +22,29 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-const AXES = ["roll", "pitch", "yaw"] as const;
+/** Parse + analyze a log off the main thread; resolves with chart-ready data. */
+function runTracesWorker(buffer: ArrayBuffer, onStage: (stage: string) => void): Promise<TracesResult> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("../lib/loglab/traces-worker.ts", import.meta.url), {
+      type: "module",
+    });
+    worker.onmessage = (e: MessageEvent<WorkerOut>) => {
+      const msg = e.data;
+      if (msg.type === "progress") {
+        onStage(msg.stage);
+        return;
+      }
+      worker.terminate();
+      if (msg.type === "done") resolve(msg.result);
+      else reject(new Error(msg.message));
+    };
+    worker.onerror = (e) => {
+      worker.terminate();
+      reject(new Error(e.message || "Trace worker failed"));
+    };
+    worker.postMessage({ buffer, maxFrames: 300_000 }, [buffer]);
+  });
+}
 
 export default function LogLabPage() {
   const qc = useQueryClient();
@@ -40,7 +54,9 @@ export default function LogLabPage() {
   const [selectedLog, setSelectedLog] = useState<number | null>(null);
   const [uploading, setUploading] = useState(false);
   const [traceLoading, setTraceLoading] = useState(false);
-  const [parsed, setParsed] = useState<ParsedLog | null>(null);
+  const [traceStage, setTraceStage] = useState<string | null>(null);
+  const [traceError, setTraceError] = useState<string | null>(null);
+  const [traces, setTraces] = useState<TracesResult | null>(null);
 
   // Deep link from the drone page: /logs?log=<id>
   useEffect(() => {
@@ -130,16 +146,18 @@ export default function LogLabPage() {
 
   const loadTraces = async (logId: number) => {
     setTraceLoading(true);
-    setParsed(null);
+    setTraceError(null);
+    setTraces(null);
     try {
       const res = await fetch(`/api/logs/${logId}/file`);
+      if (!res.ok) throw new Error(`Log download failed (${res.status})`);
       const buf = await res.arrayBuffer();
-      const p = parseBlackboxLog(new Uint8Array(buf), { maxFrames: 300_000 });
-      setParsed(p);
+      setTraces(await runTracesWorker(buf, setTraceStage));
     } catch (e) {
-      alert(`Could not parse log: ${String(e)}`);
+      setTraceError(String(e instanceof Error ? e.message : e));
     } finally {
       setTraceLoading(false);
+      setTraceStage(null);
     }
   };
 
@@ -155,7 +173,7 @@ export default function LogLabPage() {
       <div className="mb-6 flex flex-wrap items-end gap-3">
         <div className="space-y-1">
           <Label>Drone</Label>
-          <Select value={droneId} onValueChange={(v) => { setDroneId(v); setSelectedLog(null); setParsed(null); }}>
+          <Select value={droneId} onValueChange={(v) => { setDroneId(v); setSelectedLog(null); setTraces(null); setTraceError(null); }}>
             <SelectTrigger className="w-48">
               <SelectValue placeholder="Select drone…" />
             </SelectTrigger>
@@ -234,7 +252,7 @@ export default function LogLabPage() {
                     {analysisQuery.data ? "Re-analyze" : "Analyze"}
                   </Button>
                   <Button size="sm" variant="outline" onClick={() => void loadTraces(selectedLog)} disabled={traceLoading}>
-                    {traceLoading ? "Loading…" : "Load traces"}
+                    {traceLoading ? (traceStage ?? "Loading…") : "Load traces"}
                   </Button>
                 </div>
               </CardHeader>
@@ -278,7 +296,33 @@ export default function LogLabPage() {
             <ComparisonCard comparison={comparison} previousLog={previousLog} />
           )}
 
-          {parsed && <TracesView parsed={parsed} />}
+          {traceError && (
+            <Card>
+              <CardContent className="p-4 text-sm text-destructive">{traceError}</CardContent>
+            </Card>
+          )}
+
+          {traces && (traces.truncated || traces.warnings.length > 0) && (
+            <Card>
+              <CardContent className="space-y-1 p-4">
+                {traces.truncated && (
+                  <p className="text-sm text-amber-500">
+                    Long log — parsing stopped at the 300k frame cap. Traces and spectra cover the
+                    first portion only.
+                  </p>
+                )}
+                {traces.warnings
+                  .filter((w) => !w.startsWith("Log truncated"))
+                  .map((w) => (
+                    <p key={w} className="text-xs text-muted-foreground">
+                      {w}
+                    </p>
+                  ))}
+              </CardContent>
+            </Card>
+          )}
+
+          {traces && <TracesView data={traces} />}
         </div>
       </div>
     </div>
@@ -313,44 +357,8 @@ function MetricsCards({ analysis }: { analysis: Analysis }) {
   );
 }
 
-function TracesView({ parsed }: { parsed: ParsedLog }) {
-  // Heavy computations (downsampling, FFT, step detection) run once per log.
-  const data = useMemo(() => {
-    const gyroScale = parsed.gyroScale ?? 1;
-    const sampleRate = 1e6 / medianDt(parsed.timeUs);
-
-    const gyroSeries = AXES.map((axis, i) => {
-      const raw = parsed.channels[`gyroADC[${i}]`];
-      const setpoint = parsed.channels[`setpoint[${i}]`];
-      const dterm = parsed.channels[`axisD[${i}]`];
-      if (!raw && !setpoint && !dterm) return null;
-      // Build a shared x axis from whichever channel is present; missing
-      // channels become null-filled so uPlot always gets equal lengths.
-      const base = raw ?? setpoint ?? dterm;
-      const { x } = downsample(base, sampleRate, 4000, 1);
-      const withNulls = (y: number[], present: boolean): (number | null)[] =>
-        present ? y : new Array<number | null>(x.length).fill(null);
-      const gyro = withNulls(downsample(raw, sampleRate, 4000, gyroScale).y, !!raw);
-      const sp = withNulls(downsample(setpoint, sampleRate, 4000, 1).y, !!setpoint);
-      // axisD is in raw PID-sum units — plot unscaled on its own axis.
-      const d = withNulls(downsample(dterm, sampleRate, 4000, 1).y, !!dterm);
-      return { axis, x, gyro, sp, d };
-    }).filter((s): s is NonNullable<typeof s> => s !== null && s.x.length > 0);
-
-    const stepSeries = AXES.map((axis, i) => {
-      const raw = parsed.channels[`gyroADC[${i}]`];
-      const setpoint = parsed.channels[`setpoint[${i}]`];
-      if (!raw || !setpoint || sampleRate <= 0) return null;
-      const gyro = parsed.gyroScale ? raw.map((v) => v * parsed.gyroScale!) : raw;
-      const steps = detectSteps(setpoint, sampleRate);
-      const avg = averageStepResponse(gyro, setpoint, steps, sampleRate);
-      return avg ? { axis, avg } : null;
-    }).filter((s): s is NonNullable<typeof s> => s !== null);
-
-    const fftOption = buildFftOption(parsed, sampleRate);
-    return { gyroSeries, stepSeries, fftOption };
-  }, [parsed]);
-
+/** Pure renderer — all parsing/FFT/step math arrived chart-ready from the worker. */
+function TracesView({ data }: { data: TracesResult }) {
   return (
     <div className="space-y-4">
       {data.gyroSeries.map((s) => (
@@ -364,8 +372,8 @@ function TracesView({ parsed }: { parsed: ParsedLog }) {
               yLabel="deg/s"
               series={[
                 { label: "gyro", data: s.gyro, stroke: "#22d3ee" },
-                { label: "setpoint", data: s.sp, stroke: "#a78bfa" },
-                { label: "D-term (raw)", data: s.d, stroke: "#f472b6", scale: "d" },
+                { label: "setpoint", data: s.setpoint, stroke: "#a78bfa" },
+                { label: "D-term (raw)", data: s.dterm, stroke: "#f472b6", scale: "d" },
               ]}
             />
           </CardContent>
@@ -379,12 +387,12 @@ function TracesView({ parsed }: { parsed: ParsedLog }) {
           </CardHeader>
           <CardContent className="p-2">
             <UplotChart
-              x={data.stepSeries[0]!.avg.tMs}
+              x={data.stepSeries[0]!.tMs}
               xLabel="t (ms)"
               yLabel="× setpoint"
               series={data.stepSeries.map((s, i) => ({
                 label: s.axis,
-                data: s.avg.response,
+                data: s.response,
                 stroke: ["#22d3ee", "#a78bfa", "#f472b6"][i],
               }))}
             />
@@ -392,16 +400,59 @@ function TracesView({ parsed }: { parsed: ParsedLog }) {
         </Card>
       )}
 
-      <Card>
-        <CardHeader className="p-4">
-          <CardTitle className="text-sm">Gyro noise spectrum (FFT)</CardTitle>
-        </CardHeader>
-        <CardContent className="p-2">
-          <EChart option={data.fftOption} height={300} />
-        </CardContent>
-      </Card>
+      {data.spectrum.length > 0 && (
+        <Card>
+          <CardHeader className="p-4">
+            <CardTitle className="text-sm">Gyro noise spectrum (airborne average)</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 p-2">
+            <EChart option={buildSpectrumOption(data.spectrum)} height={300} />
+            <p className="px-2 text-xs text-muted-foreground">
+              Averaged over airborne spectrogram windows — the same analysis the findings use.
+              Markers: <span className="text-amber-500">frame resonance → dynamic notch</span>,{" "}
+              <span className="text-sky-400">motor harmonic → RPM filter</span>.
+            </p>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
+}
+
+/** Averaged airborne spectrum per axis with classified-peak markers. */
+function buildSpectrumOption(spectrum: SpectrumSeries[]) {
+  const colors = ["#22d3ee", "#a78bfa", "#f472b6"];
+  return {
+    backgroundColor: "transparent",
+    textStyle: { color: "#9ca3af" },
+    tooltip: { trigger: "axis" as const },
+    legend: { textStyle: { color: "#9ca3af" }, data: spectrum.map((s) => s.axis) },
+    grid: { left: 60, right: 20, top: 40, bottom: 40 },
+    xAxis: { type: "value" as const, name: "Hz", nameTextStyle: { color: "#9ca3af" }, axisLabel: { color: "#9ca3af" } },
+    yAxis: { type: "value" as const, name: "amplitude", nameTextStyle: { color: "#9ca3af" }, axisLabel: { color: "#9ca3af" } },
+    series: spectrum.map((s, i) => ({
+      name: s.axis,
+      type: "line" as const,
+      data: s.freqs.map((f, j) => [f, s.mags[j]!] as [number, number]),
+      showSymbol: false,
+      lineStyle: { color: colors[i] },
+      itemStyle: { color: colors[i] },
+      markLine: {
+        silent: true,
+        symbol: "none",
+        data: s.peaks
+          .filter((p) => p.kind !== "unknown")
+          .map((p) => ({
+            xAxis: p.freqHz,
+            label: { formatter: `${p.freqHz} Hz`, color: "#9ca3af" },
+            lineStyle: {
+              color: p.kind === "frameResonance" ? "#f59e0b" : "#38bdf8",
+              type: "dashed" as const,
+            },
+          })),
+      },
+    })),
+  };
 }
 
 /** Per-stage group-delay breakdown of the filter chain flown in this log. */
@@ -570,73 +621,4 @@ function ComparisonCard({
       </CardContent>
     </Card>
   );
-}
-
-function medianDt(timeUs: Float32Array): number {
-  if (timeUs.length < 8) return 1000;
-  const dts: number[] = [];
-  for (let i = 1; i < Math.min(timeUs.length, 2000); i++) {
-    const dt = timeUs[i]! - timeUs[i - 1]!;
-    if (dt > 0) dts.push(dt);
-  }
-  dts.sort((a, b) => a - b);
-  return dts[dts.length >> 1] ?? 1000;
-}
-
-function downsample(
-  data: Float32Array | undefined,
-  sampleRate: number,
-  maxPoints: number,
-  scale: number,
-): { x: number[]; y: number[] } {
-  if (!data || data.length === 0) return { x: [], y: [] };
-  const step = Math.max(1, Math.floor(data.length / maxPoints));
-  const x: number[] = [];
-  const y: number[] = [];
-  for (let i = 0; i < data.length; i += step) {
-    x.push(i / sampleRate);
-    y.push(data[i]! * scale);
-  }
-  return { x, y };
-}
-
-function buildFftOption(parsed: ParsedLog, sampleRate: number) {
-  const gyroScale = parsed.gyroScale ?? 1;
-  const series: { name: string; type: "line"; data: [number, number][]; showSymbol: false }[] = [];
-  const colors = ["#22d3ee", "#a78bfa", "#f472b6"];
-  AXES.forEach((axis, i) => {
-    const raw = parsed.channels[`gyroADC[${i}]`];
-    if (!raw || raw.length < 256 || sampleRate <= 0) return;
-    const gyro = new Float32Array(raw.length);
-    for (let j = 0; j < raw.length; j++) gyro[j] = raw[j]! * gyroScale;
-    // Same middle-of-flight window the server-side metrics use, so the chart
-    // matches the reported peaks.
-    const fftSize = Math.min(16384, gyro.length);
-    const spec = amplitudeSpectrum(gyro, sampleRate, {
-      maxSize: fftSize,
-      offset: Math.max(0, Math.floor((gyro.length - fftSize) / 2)),
-    });
-    const peaks = findPeaks(spec, {
-      minFreqHz: 20,
-      maxFreqHz: Math.min(600, sampleRate / 2),
-      maxPeaks: 3,
-      prominenceRatio: 4,
-    });
-    const data: [number, number][] = [];
-    for (let b = 1; b < spec.binCount; b++) {
-      if (spec.freqs[b]! > 600) break;
-      data.push([Number(spec.freqs[b]!.toFixed(1)), Number(spec.magnitudes[b]!.toFixed(2))]);
-    }
-    series.push({ name: `${axis}${peaks.length ? ` (peaks: ${peaks.map((p) => `${Math.round(p.freqHz)}Hz`).join(", ")})` : ""}`, type: "line", data, showSymbol: false });
-  });
-  return {
-    backgroundColor: "transparent",
-    textStyle: { color: "#9ca3af" },
-    tooltip: { trigger: "axis" as const },
-    legend: { textStyle: { color: "#9ca3af" }, data: series.map((s) => s.name) },
-    grid: { left: 60, right: 20, top: 40, bottom: 40 },
-    xAxis: { type: "value" as const, name: "Hz", nameTextStyle: { color: "#9ca3af" }, axisLabel: { color: "#9ca3af" } },
-    yAxis: { type: "value" as const, name: "amplitude", nameTextStyle: { color: "#9ca3af" }, axisLabel: { color: "#9ca3af" } },
-    series: series.map((s, i) => ({ ...s, lineStyle: { color: colors[i] }, itemStyle: { color: colors[i] } })),
-  };
 }

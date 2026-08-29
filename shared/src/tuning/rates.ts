@@ -6,7 +6,7 @@ import {
   type AxisRates,
   type RatesUsage,
 } from "../analysis/rates";
-import { AXES, type Axis, type ProfileSettings } from "../types/fc";
+import { AXES, RATES_TYPE, type Axis, type ProfileSettings } from "../types/fc";
 import { settingsToCli } from "./cli";
 
 /**
@@ -345,8 +345,12 @@ export function recommendRates(usage: RatesUsage | null, style: RatesStyle, size
 
   const axes = [roll, pitch, yaw];
 
+  // Actual-rates convention: rcRate = center deg/s ÷ 10, rollRate = max
+  // deg/s ÷ 10. ratesType travels with the values so the MSP apply path and
+  // the CLI snippet set the same curve family the numbers are authored for.
   const settings: ProfileSettings = {
     rates: {
+      ratesType: RATES_TYPE.ACTUAL,
       rcRate: Math.round(roll.center / 10),
       rcExpo: Math.round(roll.expo * 100),
       rollRate: Math.round(roll.max / 10),
@@ -360,8 +364,9 @@ export function recommendRates(usage: RatesUsage | null, style: RatesStyle, size
   };
 
   // CLI block in the BF 4.3+ int format used by the official presets —
-  // generated from the same settings object so the two never drift.
-  const cliBlock = ["set rates_type = ACTUAL", ...settingsToCli(settings)].join("\n");
+  // generated from the same settings object so the two never drift (includes
+  // `set rates_type = ACTUAL` via the ratesType key).
+  const cliBlock = settingsToCli(settings).join("\n");
 
   return { style, sizeClass, axes, settings, cliBlock, warnings };
 }

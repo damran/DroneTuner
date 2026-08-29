@@ -233,8 +233,23 @@ export default async function chatRoutes(app: FastifyInstance, opts: { ctx: AppC
           const d = await db.select().from(drones).where(eq(drones.id, targetDroneId)).get();
           if (!d) return { result: "Drone not found" };
           // Proposals must be schema-validated before they become action cards.
+          // settingsSchema strips unknown keys, so count actual leaf settings —
+          // a proposal of only unmanaged keys must not become an empty card.
           const parsed = settingsSchema.safeParse(a.changes ?? {});
-          if (!parsed.success || Object.keys(parsed.data).length === 0) {
+          const leafCount = parsed.success
+            ? Object.values(parsed.data).reduce<number>((n, section) => {
+                if (!section) return n;
+                // pids nests per-axis objects; the other sections are flat key→number.
+                return (
+                  n +
+                  Object.values(section as Record<string, unknown>).reduce<number>(
+                    (m, v) => m + (typeof v === "object" && v !== null ? Object.keys(v).length : 1),
+                    0,
+                  )
+                );
+              }, 0)
+            : 0;
+          if (!parsed.success || leafCount === 0) {
             return { result: "Proposed changes were invalid; no action card was created." };
           }
           const card: ActionCardProposal = {

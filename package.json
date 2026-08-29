@@ -15,13 +15,18 @@
     "dev:client": "pnpm -C client dev",
     "build": "pnpm -C client build",
     "typecheck": "pnpm -r --if-present typecheck",
+    "lint": "eslint .",
     "test": "pnpm -r --if-present test",
     "seed": "pnpm -C server seed",
     "smoke": "node scripts/smoke.mjs"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "concurrently": "^9.1.2",
+    "eslint": "^10.9.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "prettier": "^3.4.2",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.68.0"
   }
 }

@@ -16,6 +16,7 @@ import {
   FILTER_FIELDS,
   RATE_FIELDS,
   READ_COMMANDS,
+  RESTORABLE_COMMANDS,
   SET_COMMANDS,
   decodeApiVersion,
   decodeBoardInfo,
@@ -218,9 +219,23 @@ export const useMspStore = create<MspStore>((set, get) => ({
   },
 
   restore: async (dump: FcDump) => {
-    const { writable } = get();
+    const { info, writable } = get();
     if (!writable) throw new Error("Writes are disabled for this firmware version (read-only mode)");
+    // Raw payload replay is only meaningful on the firmware the snapshot was
+    // taken from — a variant/API mismatch would write bytes at wrong offsets.
+    if (info && (dump.fcVariant !== info.fcVariant || dump.apiVersion !== info.apiVersion)) {
+      throw new Error(
+        `Snapshot is from ${dump.fcVariant} API ${dump.apiVersion}, but the connected FC is ` +
+          `${info.fcVariant} API ${info.apiVersion}. Restoring across firmware versions is refused.`,
+      );
+    }
+    // Replay is limited to the four tuning SET commands, no matter where the
+    // dump came from — a stored row must never become a way to send arming,
+    // feature, or reboot commands to the FC.
     for (const section of dump.sections) {
+      if (!RESTORABLE_COMMANDS.has(section.command)) {
+        throw new Error(`Snapshot contains non-restorable MSP command ${section.command} — refusing to replay it.`);
+      }
       if (!section.payloadHex) continue;
       await serial.query(section.command, fromHex(section.payloadHex));
     }

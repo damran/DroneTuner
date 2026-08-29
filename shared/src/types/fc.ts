@@ -53,6 +53,16 @@ export interface FilterSettings {
   rpmFilterWeight3?: number;
 }
 
+/**
+ * BF rates_type enum (fc/controlrate_profile): the curve family the rcRates/
+ * rates/expo ints are interpreted under. BF 4.3+ defaults to ACTUAL, where
+ * rcRates = center sensitivity (deg/s ÷ 10) and rates = max rate (deg/s ÷ 10);
+ * BETAFLIGHT (legacy) uses ×100 multiplier / super-rate instead. A profile's
+ * rates are meaningless without their convention, so profiles carry it.
+ */
+export const RATES_TYPE = { BETAFLIGHT: 0, RACEFLIGHT: 1, KISS: 2, ACTUAL: 3, QUICK: 4 } as const;
+export const RATES_TYPE_NAMES: readonly string[] = ["BETAFLIGHT", "RACEFLIGHT", "KISS", "ACTUAL", "QUICK"];
+
 /** RC tuning fields the tuning system understands (subset of MSP_RC_TUNING). */
 export interface RateSettings {
   rcRate?: number;
@@ -61,11 +71,13 @@ export interface RateSettings {
   rcExpoPitch?: number;
   rcRateYaw?: number;
   rcExpoYaw?: number;
-  rollRate?: number; // super rate
+  rollRate?: number; // super rate (BETAFLIGHT) / max rate deg/s ÷ 10 (ACTUAL)
   pitchRate?: number;
   yawRate?: number;
   thrMid?: number;
   thrExpo?: number;
+  /** Curve convention these values are authored for (RATES_TYPE). */
+  ratesType?: number;
 }
 
 /** PID-advanced fields the tuning system understands (subset of MSP_PID_ADVANCED). */
@@ -89,7 +101,7 @@ export interface AdvancedSettings {
   dMaxAdvance?: number;
   thrustLinear?: number;
   antiGravityGain?: number;
-  tpaMode?: number; // 0 = D only, 1 = P+D
+  tpaMode?: number; // BF lookupTableTpaMode: 0 = PD (attenuate P and D), 1 = D only
   tpaRate?: number;
   tpaBreakpoint?: number;
   vbatSagCompensation?: number;

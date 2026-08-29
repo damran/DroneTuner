@@ -19,6 +19,8 @@ export interface ParsedLog {
   /** deg/s per raw gyro unit */
   gyroScale: number | null;
   firmware: string | null;
+  /** true when parsing stopped at the maxFrames cap with data remaining */
+  truncated: boolean;
   warnings: string[];
 }
 

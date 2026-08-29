@@ -64,6 +64,39 @@ describe("groupDelayMs anchors", () => {
     expect(biquad / pt1).toBeGreaterThan(2.3);
   });
 
+  it("spreads N dynamic notches across the range instead of stacking them", () => {
+    // BF places its N dynamic notches at N distinct detected peaks. Stacking
+    // all of them on one frequency would multiply the delay there.
+    const mk = (count: number) =>
+      estimateFilterDelay(
+        {
+          ...BF45_FILTER_DEFAULTS,
+          gyroLowpassHz: 0,
+          gyroLowpassDynMinHz: 0,
+          gyroLowpassDynMaxHz: 0,
+          gyroLowpass2Hz: 0,
+          dtermLowpassDynMinHz: 0,
+          dtermLowpassDynMaxHz: 0,
+          dtermLowpass2Hz: 0,
+          dynNotchCount: count,
+          dynNotchMinHz: 100,
+          dynNotchMaxHz: 600,
+          dynNotchQ: 300,
+          rpmFilterHarmonics: 0,
+        },
+        { gyroRateHz: 8000, pidLoopRateHz: 8000, referenceFreqHz: 50 },
+      );
+    const one = mk(1);
+    const three = mk(3);
+    expect(three.gyroMs).toBeGreaterThan(one.gyroMs);
+    // Spread out, 3 notches cost well under 2× a single notch at the range
+    // minimum (stacked they would cost ~3×).
+    expect(three.gyroMs).toBeLessThan(one.gyroMs * 2);
+    const stage = three.stages.find((s) => s.name.startsWith("Dynamic notch"));
+    // f0 = range min (no resonance detected), rest spread by k/count.
+    expect(stage?.name).toContain("100/267/433");
+  });
+
   it("a notch far above the reference frequency adds little delay", () => {
     const est = estimateFilterDelay(
       {

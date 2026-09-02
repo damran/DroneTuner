@@ -17,4 +17,9 @@ export const MSP_SET_PID_ADVANCED = 95;
 export const MSP_SET_PID = 202;
 export const MSP_SET_RC_TUNING = 204;
 export const MSP_EEPROM_WRITE = 250;
+/** Select the active PID profile (payload u8 index) or rate profile (index | 0x80).
+ *  Betaflight ignores it while armed; it can never arm the craft. */
+export const MSP_SELECT_SETTING = 210;
+/** Rate-profile flag in MSP_SELECT_SETTING's index byte. */
+export const RATEPROFILE_MASK = 0x80;
 export const MSP_REBOOT = 68;

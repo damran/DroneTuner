@@ -134,9 +134,9 @@ function Banner({
   children: React.ReactNode;
 }) {
   const colors = {
-    success: "border-green-500/40 bg-green-500/10",
-    warning: "border-yellow-500/40 bg-yellow-500/10",
-    info: "border-blue-500/40 bg-blue-500/10",
+    success: "border-success/40 bg-success/10",
+    warning: "border-warning/40 bg-warning/10",
+    info: "border-info/40 bg-info/10",
   }[tone];
   return (
     <div className={`flex flex-wrap items-center gap-3 rounded-md border px-3 py-2 text-sm ${colors}`}>

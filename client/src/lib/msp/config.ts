@@ -247,14 +247,80 @@ export function patchPayload(
   return out;
 }
 
+export interface FcStatus {
+  /** 0-based active PID profile */
+  pidProfile: number;
+  pidProfileCount: number;
+  /** 0-based active rate profile */
+  rateProfile: number;
+  /** ARM flag of flightModeFlags — DroneTuner never sends anything while this is set. */
+  armed: boolean;
+  cpuLoadPercent: number;
+}
+
+/**
+ * MSP_STATUS_EX (API 1.45/1.46; verified against betaflight-configurator
+ * MSPHelper.js): cycleTime u16, i2cError u16, activeSensors u16,
+ * flightModeFlags u32, pidProfile u8, cpuLoad u16, pidProfileCount u8,
+ * rateProfile u8, … (additional mode flags / arming-disable flags follow).
+ */
+export function decodeStatusEx(payload: Uint8Array): FcStatus {
+  const u16 = (o: number) => (payload[o] ?? 0) | ((payload[o + 1] ?? 0) << 8);
+  const flightModeFlags =
+    ((payload[6] ?? 0) | ((payload[7] ?? 0) << 8) | ((payload[8] ?? 0) << 16) | ((payload[9] ?? 0) << 24)) >>> 0;
+  return {
+    pidProfile: payload[10] ?? 0,
+    cpuLoadPercent: u16(11),
+    pidProfileCount: payload[13] ?? 0,
+    rateProfile: payload[14] ?? 0,
+    armed: (flightModeFlags & 1) === 1,
+  };
+}
+
 export function readU32(payload: Uint8Array): number {
   return (payload[0] ?? 0) | ((payload[1] ?? 0) << 8) | ((payload[2] ?? 0) << 16) | ((payload[3] ?? 0) << 24);
 }
 
-/** Writes are only allowed on Betaflight 4.4/4.5 (MSP API 1.45/1.46). */
+/**
+ * Writes are allowed on Betaflight 4.4/4.5 (MSP API 1.45/1.46) and 2025.12
+ * ("4.6", API 1.47): MSP_FILTER_CONFIG / MSP_PID_ADVANCED / MSP_PID payloads
+ * are byte-identical across 1.45–1.47 and MSP_RC_TUNING only appends a
+ * throttle-hover byte at 1.47 (preserved by patchPayload). 1.48 (2026.6)
+ * appends RPM-filter fields and is read-only until verified.
+ */
 export function isWritableApi(apiVersion: string): boolean {
   const [major, minor] = apiVersion.split(".").map((n) => Number.parseInt(n, 10));
-  return major === 1 && (minor === 45 || minor === 46);
+  return major === 1 && (minor === 45 || minor === 46 || minor === 47);
+}
+
+/** Betaflight 2025.12+ (API 1.47): D is the resting value and "d_max" the ceiling. */
+export function isDMaxApi(apiVersion: string): boolean {
+  const [major, minor] = apiVersion.split(".").map((n) => Number.parseInt(n, 10));
+  return major === 1 && minor >= 47;
+}
+
+/**
+ * Translate a 4.5-authored profile for a 2025.12 FC: in 4.5 `D` is the
+ * ceiling and `d_min` the resting floor; in 2025.12 the same MSP bytes carry
+ * `D` = resting value and `d_max` (offsets 39–41) = ceiling. Swapping the two
+ * per axis keeps the flown behaviour identical. Yaw has no floor in 4.5.
+ */
+export function translateSettingsForApi(settings: ProfileSettings, apiVersion: string): ProfileSettings {
+  if (!isDMaxApi(apiVersion)) return settings;
+  const out: ProfileSettings = { ...settings, pids: settings.pids ? { ...settings.pids } : undefined, advanced: settings.advanced ? { ...settings.advanced } : undefined };
+  const pids = out.pids;
+  const adv = out.advanced;
+  for (const axis of ["roll", "pitch"] as const) {
+    const key = axis === "roll" ? "dMinRoll" : "dMinPitch";
+    const ceiling = pids?.[axis]?.d;
+    const floor = adv?.[key];
+    if (ceiling === undefined && floor === undefined) continue;
+    if (pids && floor !== undefined) pids[axis] = { ...pids[axis], d: floor };
+    if (ceiling !== undefined) {
+      out.advanced = { ...(out.advanced ?? {}), [key]: ceiling };
+    }
+  }
+  return out;
 }
 
 /** The only MSP commands a stored snapshot may replay (the four tuning writes). */

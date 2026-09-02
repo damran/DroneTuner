@@ -2,6 +2,16 @@ import { create } from "zustand";
 import type { ProfileSettings } from "@dronetuner/shared";
 import { partitionCliOnly } from "@dronetuner/shared/tuning";
 
+/** One side of an in-flight A/B test: a full settings set for one PID profile slot. */
+export interface AbVariantPayload {
+  /** e.g. "A · Crisp" */
+  label: string;
+  /** 0-based PID profile slot to write into */
+  profile: number;
+  settings: ProfileSettings;
+  cliOnlyStripped?: string[];
+}
+
 export interface ApplyPayload {
   droneId: number;
   profileId?: number;
@@ -10,6 +20,11 @@ export interface ApplyPayload {
   /** CLI-only keys removed from `settings` (not MSP-writable on BF 4.4/4.5) —
    *  shown in the confirm dialog so the diff matches what will be written. */
   cliOnlyStripped?: string[];
+  /**
+   * A/B mode: write each variant into its own PID profile (snapshot each
+   * slot first), then leave profile A active. Mutually exclusive with `settings`.
+   */
+  ab?: AbVariantPayload[];
 }
 
 interface ApplyState {
@@ -25,6 +40,14 @@ export const useApplyStore = create<ApplyState>((set) => ({
   start: (payload) => {
     // Single choke point: CLI-only keys never reach the MSP write path, no
     // matter which UI (wizard, chat card, baseline panel) started the flow.
+    if (payload.ab) {
+      const ab = payload.ab.map((v) => {
+        const { msp, stripped } = partitionCliOnly(v.settings);
+        return { ...v, settings: msp, cliOnlyStripped: stripped };
+      });
+      set({ payload: { ...payload, ab }, open: true });
+      return;
+    }
     if (payload.settings) {
       const { msp, stripped } = partitionCliOnly(payload.settings);
       if (stripped.length > 0) {

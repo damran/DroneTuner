@@ -31,6 +31,7 @@ import {
   mergeSection,
   patchPayload,
   readU32,
+  translateSettingsForApi,
 } from "./config";
 import {
   MSP_API_VERSION,
@@ -40,8 +41,12 @@ import {
   MSP_FC_VERSION,
   MSP_FEATURE_CONFIG,
   MSP_NAME,
+  MSP_SELECT_SETTING,
+  MSP_STATUS_EX,
   MSP_UID,
+  RATEPROFILE_MASK,
 } from "./commands";
+import { decodeStatusEx, type FcStatus } from "./config";
 
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "readonly" | "error";
 
@@ -51,6 +56,8 @@ interface MspStore {
   info: { apiVersion: string; fcVariant: string; fcVersion: string } | null;
   identity: FcIdentity | null;
   config: FcConfig | null;
+  /** Active profile / arming state from MSP_STATUS_EX (refreshed with the config). */
+  status: FcStatus | null;
   writable: boolean;
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
@@ -59,17 +66,47 @@ interface MspStore {
   applySections: (sections: ConfigSection[], target: ProfileSettings) => Promise<void>;
   saveEeprom: () => Promise<void>;
   restore: (dump: FcDump) => Promise<void>;
+  /**
+   * Make PID profile `index` active (MSP_SELECT_SETTING) and re-read the
+   * config. Refused while armed. The selection is stored by the next EEPROM
+   * save, exactly like Configurator's profile dropdown.
+   */
+  selectPidProfile: (index: number) => Promise<void>;
 }
 
 const serial = new MspSerial();
 let rawPayloads = new Map<number, Uint8Array>();
 
-export const useMspStore = create<MspStore>((set, get) => ({
+export const useMspStore = create<MspStore>((set, get) => {
+  /**
+   * Fresh arming check for every write path. The cached `status` can be
+   * minutes old by the time the user clicks Confirm, so MSP_STATUS_EX is
+   * re-read here; a failed read refuses too (fail closed) — an unknown
+   * arming state is never treated as "disarmed".
+   */
+  const assertDisarmed = async (action: string): Promise<FcStatus> => {
+    let status: FcStatus;
+    try {
+      status = decodeStatusEx(await serial.query(MSP_STATUS_EX));
+    } catch (err) {
+      throw new Error(`Could not read the arming state (MSP_STATUS_EX failed: ${String(err)}) — refusing to ${action}.`, {
+        cause: err,
+      });
+    }
+    set({ status });
+    if (status.armed) {
+      throw new Error(`The flight controller reports ARMED — refusing to ${action}. Disarm (and remove props) first.`);
+    }
+    return status;
+  };
+
+  return {
   state: "disconnected",
   error: null,
   info: null,
   identity: null,
   config: null,
+  status: null,
   writable: false,
 
   connect: async () => {
@@ -85,7 +122,7 @@ export const useMspStore = create<MspStore>((set, get) => ({
 
   disconnect: async () => {
     await serial.disconnect();
-    set({ state: "disconnected", info: null, identity: null, config: null, writable: false, error: null });
+    set({ state: "disconnected", info: null, identity: null, config: null, status: null, writable: false, error: null });
   },
 
   refresh: async () => {
@@ -127,6 +164,13 @@ export const useMspStore = create<MspStore>((set, get) => ({
       /* unsupported */
     }
 
+    let status: FcStatus | null = null;
+    try {
+      status = decodeStatusEx(await serial.query(MSP_STATUS_EX));
+    } catch {
+      /* unsupported */
+    }
+
     const pidPayload = await serial.query(READ_COMMANDS.pids);
     const advancedPayload = await serial.query(READ_COMMANDS.advanced);
     const filterPayload = await serial.query(READ_COMMANDS.filters);
@@ -158,13 +202,14 @@ export const useMspStore = create<MspStore>((set, get) => ({
       info: { apiVersion, fcVariant: variant, fcVersion: version },
       identity,
       config,
+      status,
       writable,
       error: null,
     });
   },
 
   takeSnapshot: (): FcDump | null => {
-    const { config } = get();
+    const { config, status } = get();
     if (!config) return null;
     const sections: FcDumpSection[] = CONFIG_SECTION_ORDER.map((section) => {
       const payload = rawPayloads.get(READ_COMMANDS[section]);
@@ -177,6 +222,7 @@ export const useMspStore = create<MspStore>((set, get) => ({
       capturedAt: Date.now(),
       sections,
       decoded: config,
+      pidProfile: status?.pidProfile,
     };
   },
 
@@ -184,9 +230,12 @@ export const useMspStore = create<MspStore>((set, get) => ({
     const { config, writable } = get();
     if (!config) throw new Error("Not connected to a flight controller");
     if (!writable) throw new Error("Writes are disabled for this firmware version (read-only mode)");
+    await assertDisarmed("write");
 
+    // 2025.12 (API 1.47) swaps the meaning of D / D-min on the wire.
+    const effectiveTarget = translateSettingsForApi(target, config.apiVersion);
     for (const section of sections) {
-      const merged = mergeSection(config, target, section);
+      const merged = mergeSection(config, effectiveTarget, section);
       const raw = rawPayloads.get(READ_COMMANDS[section]);
       if (!raw) throw new Error(`Missing raw payload for section ${section}`);
 
@@ -215,12 +264,33 @@ export const useMspStore = create<MspStore>((set, get) => ({
   },
 
   saveEeprom: async () => {
+    await assertDisarmed("save to EEPROM");
     await serial.query(MSP_EEPROM_WRITE);
+  },
+
+  selectPidProfile: async (index: number) => {
+    const { config } = get();
+    if (!config) throw new Error("Not connected to a flight controller");
+    const status = await assertDisarmed("switch profiles");
+    const count = status.pidProfileCount || 3;
+    if (!Number.isInteger(index) || index < 0 || index >= count) {
+      throw new Error(`PID profile ${index + 1} does not exist (this FC has ${count})`);
+    }
+    // Plain index = PID profile; index | RATEPROFILE_MASK would select a RATE profile.
+    await serial.query(MSP_SELECT_SETTING, new Uint8Array([index & ~RATEPROFILE_MASK & 0xff]));
+    await get().refresh();
+    const after = get().status;
+    if (after && after.pidProfile !== index) {
+      throw new Error(`FC did not switch to PID profile ${index + 1} (still on ${after.pidProfile + 1})`);
+    }
   },
 
   restore: async (dump: FcDump) => {
     const { info, writable } = get();
     if (!writable) throw new Error("Writes are disabled for this firmware version (read-only mode)");
+    // Unconditional: the profile-select and EEPROM steps below check too, but
+    // the section replay itself must never reach an armed FC.
+    await assertDisarmed("restore a snapshot");
     // Raw payload replay is only meaningful on the firmware the snapshot was
     // taken from — a variant/API mismatch would write bytes at wrong offsets.
     if (info && (dump.fcVariant !== info.fcVariant || dump.apiVersion !== info.apiVersion)) {
@@ -228,6 +298,13 @@ export const useMspStore = create<MspStore>((set, get) => ({
         `Snapshot is from ${dump.fcVariant} API ${dump.apiVersion}, but the connected FC is ` +
           `${info.fcVariant} API ${info.apiVersion}. Restoring across firmware versions is refused.`,
       );
+    }
+    // Profile-aware: the sections were read from a specific PID profile, so
+    // make that profile active before replaying (selection is a separate,
+    // non-replayed step; the allowlist below still governs the replay).
+    const current = get().status?.pidProfile;
+    if (dump.pidProfile !== undefined && current !== undefined && dump.pidProfile !== current) {
+      await get().selectPidProfile(dump.pidProfile);
     }
     // Replay is limited to the four tuning SET commands, no matter where the
     // dump came from — a stored row must never become a way to send arming,
@@ -242,7 +319,8 @@ export const useMspStore = create<MspStore>((set, get) => ({
     await get().saveEeprom();
     await get().refresh();
   },
-}));
+  };
+});
 
 export function isSerialSupported(): boolean {
   return MspSerial.isSupported();

@@ -10,9 +10,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import DetectBanner from "@/components/DetectBanner";
+import { useAdvanced } from "@/lib/ui-store";
 
 export default function ConnectPanel({ droneId }: { droneId: number }) {
   const msp = useMspStore();
+  const advanced = useAdvanced();
   const [snapshotSaved, setSnapshotSaved] = useState(false);
 
   const saveSnapshot = async () => {
@@ -79,9 +81,24 @@ export default function ConnectPanel({ droneId }: { droneId: number }) {
             <Badge variant="secondary">API {info.apiVersion}</Badge>
             {identity?.targetName && <Badge variant="outline">{identity.targetName}</Badge>}
             {identity?.craftName && <Badge variant="outline">“{identity.craftName}”</Badge>}
-            {writable ? <Badge variant="success">Writable</Badge> : <Badge variant="warning">Read-only (BF 4.4/4.5 only)</Badge>}
+            {writable ? <Badge variant="success">Writable</Badge> : <Badge variant="warning">Read-only (BF 4.4 / 4.5 / 2025.12 only)</Badge>}
+            {msp.status && (
+              <Badge variant="outline">
+                PID profile {msp.status.pidProfile + 1}/{msp.status.pidProfileCount} · rate profile {msp.status.rateProfile + 1}
+              </Badge>
+            )}
+            {msp.status?.armed && <Badge variant="warning">ARMED — writes refused</Badge>}
           </div>
 
+          {!advanced && (
+            <p className="text-xs text-muted-foreground">
+              Roll P/I/D {config.pids.roll.p}/{config.pids.roll.i}/{config.pids.roll.d}, pitch {config.pids.pitch.p}/{config.pids.pitch.i}/{config.pids.pitch.d}
+              {config.filters.dynNotchCount !== undefined ? ` · ${config.filters.dynNotchCount} dyn notch ${config.filters.dynNotchMinHz}–${config.filters.dynNotchMaxHz} Hz` : ""}. Advanced mode shows every value.
+            </p>
+          )}
+
+          {advanced && (
+          <>
           <div>
             <h4 className="mb-1 text-sm font-semibold">PID</h4>
             <Table>
@@ -149,6 +166,8 @@ export default function ConnectPanel({ droneId }: { droneId: number }) {
               <FilterRow label="FF roll" value={formatFeedforward(config.advanced.feedforwardRoll)} />
             </div>
           </div>
+          </>
+          )}
         </CardContent>
       )}
     </Card>

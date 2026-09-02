@@ -5,7 +5,7 @@ import { RATES_TYPE_NAMES } from "@dronetuner/shared";
 import { diffConfig } from "@dronetuner/shared/tuning";
 import { apiGet, apiPost } from "@/lib/api";
 import { useApplyStore } from "@/lib/apply-store";
-import { isSerialSupported, useMspStore } from "@/lib/msp";
+import { isDMaxApi, isSerialSupported, translateSettingsForApi, useMspStore } from "@/lib/msp";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,6 +19,16 @@ import DiffView from "./DiffView";
 
 type Step = "connect" | "review" | "apply" | "done";
 
+interface AbPlan {
+  label: string;
+  profile: number;
+  settings: ProfileSettings;
+  snapshot: FcDump;
+  diff: DiffEntry[];
+  sections: ConfigSection[];
+  cliOnlyStripped?: string[];
+}
+
 export default function ApplyFlow() {
   const { open, payload, close } = useApplyStore();
   const msp = useMspStore();
@@ -29,6 +39,11 @@ export default function ApplyFlow() {
   const [snapshot, setSnapshot] = useState<FcDump | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [abPlans, setAbPlans] = useState<AbPlan[]>([]);
+  const [progress, setProgress] = useState<string | null>(null);
+  /** An A/B write stopped part-way: the FC may hold a half-written, unsaved slot. */
+  const [abWriteFailed, setAbWriteFailed] = useState(false);
+  const isAb = !!payload?.ab && payload.ab.length > 0;
 
   const profileQuery = useQuery({
     queryKey: ["profile", payload?.profileId],
@@ -63,6 +78,95 @@ export default function ApplyFlow() {
     setTarget(null);
     setSnapshot(null);
     setError(null);
+    setAbPlans([]);
+    setProgress(null);
+    setAbWriteFailed(false);
+  };
+
+  // A/B: select each slot, snapshot it (restore point per profile), diff the
+  // variant against what that slot holds now.
+  const reviewAb = async () => {
+    if (!msp.config || !payload?.ab) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const plans: AbPlan[] = [];
+      for (const v of payload.ab) {
+        setProgress(`Reading PID profile ${v.profile + 1} (${v.label})…`);
+        await msp.selectPidProfile(v.profile);
+        const cfg = useMspStore.getState().config;
+        const dump = useMspStore.getState().takeSnapshot();
+        if (!cfg || !dump) throw new Error("Could not capture a snapshot");
+        await apiPost("/api/snapshots", { droneId: payload.droneId, dump, reason: `ab-flow profile ${v.profile + 1}` });
+        const result = diffConfig(cfg, translateSettingsForApi(v.settings, cfg.apiVersion));
+        plans.push({ ...v, snapshot: dump, diff: result.diff, sections: result.sections });
+      }
+      setAbPlans(plans);
+      setStep("review");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  };
+
+  const applyAb = async () => {
+    if (abPlans.length === 0) return;
+    setBusy(true);
+    setError(null);
+    setStep("apply");
+    try {
+      for (const plan of abPlans) {
+        setProgress(`Writing ${plan.label} into PID profile ${plan.profile + 1}…`);
+        await msp.selectPidProfile(plan.profile);
+        if (plan.sections.length > 0) await msp.applySections(plan.sections, plan.settings);
+      }
+      // Leave the pilot on A, then persist everything (incl. the selection).
+      setProgress("Selecting profile A and saving to EEPROM…");
+      await msp.selectPidProfile(abPlans[0]!.profile);
+      await msp.saveEeprom();
+      setStep("done");
+    } catch (e) {
+      // The FC may now sit on a partially written, unsaved slot. Go back to
+      // A on a best-effort basis and say so plainly — the pilot must not arm
+      // on this state without a power cycle or a restore.
+      const stage = progress ?? "an unknown step";
+      let note = "";
+      try {
+        await msp.selectPidProfile(abPlans[0]!.profile);
+      } catch {
+        note = " Re-selecting profile A also failed.";
+      }
+      setAbWriteFailed(true);
+      setError(
+        `${String(e)} — the write stopped during "${stage}". The FC may hold half-written, unsaved settings in that slot: ` +
+          `restore both snapshots below, or power-cycle the FC (unsaved changes are dropped) before flying.${note}`,
+      );
+      setStep("review");
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  };
+
+  const restoreAb = async () => {
+    if (abPlans.length === 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // Each snapshot carries its profile; restore() selects it before replay.
+      for (const plan of abPlans) {
+        setProgress(`Restoring PID profile ${plan.profile + 1}…`);
+        await msp.restore(plan.snapshot);
+      }
+      close();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
   };
 
   const handleClose = (o: boolean) => {
@@ -82,7 +186,7 @@ export default function ApplyFlow() {
       setSnapshot(dump);
       // Persist the restore point
       await apiPost("/api/snapshots", { droneId: payload.droneId, dump, reason: "apply-flow" });
-      const result = diffConfig(msp.config, targetSettings);
+      const result = diffConfig(msp.config, translateSettingsForApi(targetSettings, msp.config.apiVersion));
       setDiff(result.diff);
       setSections(result.sections);
       setTarget(targetSettings);
@@ -129,9 +233,11 @@ export default function ApplyFlow() {
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Apply {payload?.profileName ?? "tuning changes"}</DialogTitle>
+          <DialogTitle>{isAb ? "Write A/B profiles" : `Apply ${payload?.profileName ?? "tuning changes"}`}</DialogTitle>
           <DialogDescription>
-            Every write flow: snapshot → diff of every changed value → confirm → apply → EEPROM save.
+            {isAb
+              ? "Each PID profile slot is snapshotted before it is overwritten. Profile A stays active; fly it, land, switch to B and fly again."
+              : "Every write flow: snapshot → diff of every changed value → confirm → apply → EEPROM save."}
           </DialogDescription>
         </DialogHeader>
 
@@ -156,18 +262,67 @@ export default function ApplyFlow() {
               Connected to {msp.info?.fcVariant} {msp.info?.fcVersion} (API {msp.info?.apiVersion}).
             </p>
             {!msp.writable && (
-              <Badge variant="warning">Read-only — writes are gated to Betaflight 4.4/4.5</Badge>
+              <Badge variant="warning">Read-only — writes are gated to Betaflight 4.4 / 4.5 / 2025.12</Badge>
             )}
-            <Button onClick={() => void review()} disabled={!msp.writable || busy}>
-              {busy ? "Capturing snapshot…" : "Capture snapshot & review diff"}
+            {msp.status?.armed && <Badge variant="warning">FC reports ARMED — disarm first</Badge>}
+            {isAb && msp.status && (
+              <p className="text-xs text-muted-foreground">
+                FC is on PID profile {msp.status.pidProfile + 1} of {msp.status.pidProfileCount}. Slots to write:{" "}
+                {payload!.ab!.map((v) => `${v.label} → profile ${v.profile + 1}`).join(", ")}.
+              </p>
+            )}
+            <Button onClick={() => void (isAb ? reviewAb() : review())} disabled={!msp.writable || busy || !!msp.status?.armed}>
+              {busy ? (progress ?? "Capturing snapshot…") : isAb ? "Snapshot both slots & review" : "Capture snapshot & review diff"}
             </Button>
           </div>
         )}
 
-        {connected && step === "review" && (
+        {connected && step === "review" && isAb && (
+          <div className="space-y-4">
+            {abPlans.map((plan) => (
+              <div key={plan.profile} className="space-y-2 rounded-lg border p-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium">{plan.label}</span>
+                  <Badge variant="secondary">PID profile {plan.profile + 1}</Badge>
+                </div>
+                {plan.diff.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">This slot already matches the variant.</p>
+                ) : (
+                  <DiffView diff={plan.diff} />
+                )}
+                {plan.cliOnlyStripped && plan.cliOnlyStripped.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    CLI-only on BF 4.4/4.5, excluded: {plan.cliOnlyStripped.join(", ")}.
+                  </p>
+                )}
+              </div>
+            ))}
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={() => void applyAb()} disabled={busy || abPlans.every((p) => p.diff.length === 0)}>
+                {abWriteFailed ? "Retry: write both profiles" : "Confirm & write both profiles"}
+              </Button>
+              {abWriteFailed && (
+                <Button variant="outline" onClick={() => void restoreAb()} disabled={busy}>
+                  {busy ? (progress ?? "Restoring…") : "Restore both snapshots"}
+                </Button>
+              )}
+              <Button variant="outline" onClick={reset}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {connected && step === "review" && !isAb && (
           <div className="space-y-3">
             <DiffView diff={diff} />
-            {ratesConventionWarning && <p className="text-xs text-amber-500">{ratesConventionWarning}</p>}
+            {ratesConventionWarning && <p className="text-xs text-warning">{ratesConventionWarning}</p>}
+            {msp.config && isDMaxApi(msp.config.apiVersion) && (
+              <p className="text-xs text-muted-foreground">
+                Betaflight 2025.12 (API {msp.config.apiVersion}): rows labelled D are the resting D and “D min” rows are the D max ceiling — the 4.5 values were swapped to keep the same behaviour.
+              </p>
+            )}
             {payload?.cliOnlyStripped && payload.cliOnlyStripped.length > 0 && (
               <p className="text-xs text-muted-foreground">
                 Not MSP-writable on BF 4.4/4.5, excluded from this apply:{" "}
@@ -187,16 +342,36 @@ export default function ApplyFlow() {
         )}
 
         {connected && step === "apply" && (
-          <p className="text-sm text-muted-foreground">Writing to the flight controller…</p>
+          <p className="text-sm text-muted-foreground">{progress ?? "Writing to the flight controller…"}</p>
         )}
 
-        {connected && step === "done" && (
+        {connected && step === "done" && isAb && (
+          <div className="space-y-3">
+            <p className="text-sm text-success">
+              Both profiles written and saved. The FC is on {abPlans[0]?.label} (PID profile {(abPlans[0]?.profile ?? 0) + 1}).
+            </p>
+            <ol className="list-decimal space-y-1 pl-5 text-xs text-muted-foreground">
+              <li>Fly A for at least 30 s: the same lines, a few sharp stick moves, some throttle chops. Land and disarm.</li>
+              <li>Switch to B while disarmed: stick command (throttle low, yaw left, then roll left = profile 1, pitch up = profile 2, roll right = profile 3; check the stick-command chart in Configurator) or OSD menu → Profiles. Betaflight 4.5 has no in-flight switch for PID profiles.</li>
+              <li>Fly B the same way in the same pack. Every arm starts a new blackbox session — upload the file and use "Compare with" in the Log Lab.</li>
+            </ol>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => void restoreAb()} disabled={busy}>
+                {busy ? (progress ?? "Restoring…") : "Restore both snapshots"}
+              </Button>
+              <Button onClick={() => void msp.refresh()}>Re-read config</Button>
+            </div>
+          </div>
+        )}
+
+        {connected && step === "done" && !isAb && (
           <div className="space-y-3">
             <p className="text-sm">
               {diff.length === 0 ? (
                 <span className="text-muted-foreground">The FC already matches this profile.</span>
               ) : (
-                <span className="text-emerald-400">Settings applied and saved to EEPROM.</span>
+                <span className="text-success">Settings applied and saved to EEPROM.</span>
               )}
             </p>
             {snapshot && (

@@ -163,6 +163,13 @@ export interface FcDump {
   capturedAt: number;
   sections: FcDumpSection[];
   decoded: FcConfig;
+  /**
+   * PID profile the sections were read from (0-based). Restore selects it
+   * before replaying, because MSP_PID / MSP_PID_ADVANCED / the D-term half of
+   * MSP_FILTER_CONFIG live in the active profile. Absent on old snapshots
+   * (= whatever profile is active).
+   */
+  pidProfile?: number;
 }
 
 /**

@@ -162,7 +162,7 @@ export default function SnapshotsPanel({ droneId }: { droneId: number }) {
                 {target.dump.fcVersion}, API {target.dump.apiVersion}).
               </p>
               {versionMismatch(target) ? (
-                <p className="text-amber-500">
+                <p className="text-warning">
                   Version mismatch: this snapshot was {versionMismatch(target)}. The restore will be
                   refused — connect the FC running the matching firmware.
                 </p>

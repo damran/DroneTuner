@@ -392,3 +392,92 @@ describe("applyChanges", () => {
     expect(out.filters?.dtermLowpassDynMaxHz).toBeUndefined();
   });
 });
+
+describe("motor pole check and aliased motor noise findings", () => {
+  it("warns with a motor_poles CLI line when the measured motor line fits another pole count", () => {
+    const out = runRules(
+      baseMetrics({
+        motorPoleCheck: { headerPoles: 12, status: "mismatch", suggestedPoles: 14, harmonic: 1, aliased: false, peakHz: 303, ratioToFloor: 9, ratio: 0.86 },
+      }),
+      "freestyle",
+    );
+    const f = out.findings.find((f) => f.id === "motor-poles");
+    expect(f).toBeDefined();
+    expect(f!.severity).toBe("warning");
+    expect(f!.title).toBe("RPM estimate does not match measured motor peak");
+    const rec = out.recommendations.find((r) => r.findingId === "motor-poles");
+    expect(rec?.cliLines).toContain("set motor_poles = 14");
+  });
+
+  it("confirms the pole count as an info finding when a harmonic matches", () => {
+    const out = runRules(
+      baseMetrics({
+        motorPoleCheck: { headerPoles: 12, status: "consistent", harmonic: 2, aliased: false, peakHz: 690, ratioToFloor: 12, ratio: 2.01 },
+      }),
+      "freestyle",
+    );
+    expect(out.findings.find((f) => f.id === "motor-poles")).toBeUndefined();
+    expect(out.findings.find((f) => f.id === "motor-poles-ok")).toBeDefined();
+  });
+
+  it("explains a folded motor harmonic and suggests a higher blackbox rate on 1/4 logs", () => {
+    const out = runRules(
+      baseMetrics({
+        sampleRateHz: 1000,
+        pidLoopRateHz: 4000,
+        gyroRateHz: 8000,
+        spectral: [spectral("roll", [peak({ kind: "motorHarmonic", freqHz: 111, harmonic: 2, aliased: true, ratioToFloor: 8 })])],
+      }),
+      "freestyle",
+    );
+    const f = out.findings.find((f) => f.id === "aliased-motor-noise");
+    expect(f).toBeDefined();
+    expect(f!.detail).toContain("not a frame resonance");
+    expect(out.recommendations.find((r) => r.findingId === "aliased-motor-noise")?.cliLines).toContain("set blackbox_sample_rate = 1/2");
+    // and it never becomes a dynamic-notch target
+    expect(out.recommendations.find((r) => r.findingId === "resonance-notch")).toBeUndefined();
+  });
+
+  it("uses deconvolution evidence for the step rules when explicit steps are scarce", () => {
+    const out = runRules(
+      baseMetrics({
+        stepResponse: [step("roll", { stepCount: 1, method: "deconvolution", windowCount: 20, overshootPercent: 35, ringingCycles: 2 })],
+      }),
+      "freestyle",
+    );
+    expect(out.findings.some((f) => f.title.includes("under-damped"))).toBe(true);
+    const scarce = runRules(baseMetrics({ stepResponse: [step("roll", { stepCount: 1, method: "steps", overshootPercent: 35 })] }), "freestyle");
+    expect(scarce.findings.some((f) => f.title.includes("under-damped"))).toBe(false);
+  });
+});
+
+describe("RPM filter rules with identified harmonics", () => {
+  it("adds a harmonic instead of widening Q when the visible line is above rpm_filter_harmonics", () => {
+    const out = runRules(
+      baseMetrics({
+        spectral: [spectral("roll", [peak({ kind: "motorHarmonic", freqHz: 976, harmonic: 3, aliased: true, ratioToFloor: 12 })])],
+        flownConfig: { filters: { rpmFilterHarmonics: 2, rpmFilterQ: 500 } as never, pids: null, advanced: null },
+      }),
+      "freestyle",
+    );
+    const rec = out.recommendations.find((r) => r.findingId === "rpm-harmonics");
+    expect(rec).toBeDefined();
+    expect(rec!.changes.filters?.rpmFilterHarmonics).toBe(1); // 2 → 3
+    expect(out.recommendations.find((r) => r.findingId === "rpm-q")).toBeUndefined();
+    expect(out.recommendations.find((r) => r.findingId === "rpm-weights")).toBeUndefined();
+  });
+
+  it("widens Q for a covered harmonic that still leaks", () => {
+    const out = runRules(
+      baseMetrics({
+        spectral: [spectral("roll", [peak({ kind: "motorHarmonic", freqHz: 81, harmonic: 2, aliased: true, ratioToFloor: 9 })])],
+        flownConfig: { filters: { rpmFilterHarmonics: 3, rpmFilterQ: 500 } as never, pids: null, advanced: null },
+      }),
+      "freestyle",
+    );
+    expect(out.recommendations.find((r) => r.findingId === "rpm-harmonics")).toBeUndefined();
+    const q = out.recommendations.find((r) => r.findingId === "rpm-q");
+    expect(q).toBeDefined();
+    expect(q!.changes.filters?.rpmFilterQ).toBeLessThan(0);
+  });
+});

@@ -1,6 +1,6 @@
 import type { AdvancedSettings, Axis, ProfileSettings } from "../types/fc";
 import type { RatesUsage } from "./rates";
-import type { AxisSpectral } from "./spectrogram";
+import type { AxisSpectral, MotorPoleCheck } from "./spectrogram";
 import type { DelayFilterConfig, FilterDelayEstimate } from "./delay";
 
 export interface NoisePeak {
@@ -30,7 +30,22 @@ export interface AxisStepMetrics {
   ffStartLagMs?: number;
   /** overshoot on return moves (end of a wiggle) — high means FF too high */
   ffEndOvershootPercent?: number | null;
+  /** explicit stick steps found by the edge detector */
   stepCount: number;
+  /**
+   * Where overshoot/rise/latency/settling/ringing come from: "steps" =
+   * averaged explicit stick steps; "deconvolution" = system identification
+   * over 2 s windows with stick input (PIDtoolbox method), used when explicit
+   * steps are scarce. Absent in analyses persisted before this existed.
+   */
+  method?: "steps" | "deconvolution";
+  /** windows that fed the deconvolution estimate */
+  windowCount?: number;
+  /**
+   * Low-frequency gyro/setpoint gain before normalisation (deconvolution
+   * only). Well below 1 on disturbance-heavy indoor flights.
+   */
+  trackingGain?: number;
 }
 
 export interface LogMetrics {
@@ -76,6 +91,12 @@ export interface LogMetrics {
    * Absent in analyses persisted before the delay estimator existed.
    */
   filterDelay?: FilterDelayEstimate | null;
+  /**
+   * motor_poles sanity check against the eRPM-derived motor frequency (the
+   * strongest evidence across axes). Null when the log has no eRPM channels;
+   * absent in analyses persisted before the check existed.
+   */
+  motorPoleCheck?: MotorPoleCheck | null;
   /** gyro sample rate / PID loop rate from log headers (null when unknown) */
   gyroRateHz?: number | null;
   pidLoopRateHz?: number | null;

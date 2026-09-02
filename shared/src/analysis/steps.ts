@@ -16,17 +16,17 @@ export interface StepWindow {
 }
 
 export interface DetectStepsOptions {
-  /** minimum |setpoint change| to count as a step (deg/s, default 150) */
+  /** minimum |setpoint change| to count as a step (deg/s, default 100) */
   minAmplitude?: number;
-  /** required plateau hold after the edge (ms, default 50) */
+  /** required plateau hold after the edge (ms, default 30) */
   minHoldMs?: number;
-  /** required quiet time before the edge (ms, default 30) — the step must
+  /** required quiet time before the edge (ms, default 20) — the step must
    *  start from a steady state so the response is attributable */
   preQuietMs?: number;
   /** response window cap (ms, default 300) */
   windowMs?: number;
   /**
-   * Edge threshold on the setpoint derivative (deg/s², default 4000). A sharp
+   * Edge threshold on the setpoint derivative (deg/s², default 3000). A sharp
    * stick move ramps the setpoint over a few ms even with RC smoothing, so a
    * derivative threshold catches smoothed steps that a per-sample jump
    * threshold would miss.
@@ -39,8 +39,10 @@ export interface DetectStepsOptions {
  * flag samples where the setpoint derivative exceeds a threshold, group
  * consecutive flags into one edge, then require a real amplitude change and a
  * short post-step plateau hold. This deliberately accepts the quick
- * out-and-back "wiggle" moves used for PID tuning flights (≥50 ms holds),
- * which the old 400 ms-hold detector discarded.
+ * out-and-back "wiggle" moves used for PID tuning flights (≥30 ms holds).
+ * Real whoop flights rarely hold a plateau at all, so the defaults are
+ * lenient; when fewer than a handful of steps survive, the metrics pipeline
+ * falls back to the deconvolution estimate (see stepresponse.ts).
  */
 export function detectSteps(
   setpoint: Float32Array,
@@ -48,11 +50,11 @@ export function detectSteps(
   options: DetectStepsOptions = {},
 ): StepWindow[] {
   const {
-    minAmplitude = 150,
-    minHoldMs = 50,
-    preQuietMs = 30,
+    minAmplitude = 100,
+    minHoldMs = 30,
+    preQuietMs = 20,
     windowMs = 300,
-    edgeThresholdDegS2 = 4000,
+    edgeThresholdDegS2 = 3000,
   } = options;
   const n = setpoint.length;
   if (n < 64 || sampleRate <= 0) return [];
@@ -179,6 +181,7 @@ export function stepResponseMetrics(
   let latencySum = 0;
   let ringingSum = 0;
   let sseSum = 0;
+  let sseCount = 0;
   let ffLagSum = 0;
   let ffEndSum = 0;
   let ffEndCount = 0;
@@ -207,7 +210,11 @@ export function stepResponseMetrics(
     settleSum += settlingTime(resp, sampleRate);
     latencySum += latency(resp, sampleRate);
     ringingSum += ringing(resp);
-    sseSum += steadyStateError(resp, step, sampleRate);
+    const sse = steadyStateError(resp, step, sampleRate);
+    if (sse !== null) {
+      sseSum += sse;
+      sseCount++;
+    }
     ffLagSum += ffStartLag(gyro, setpoint, step, base, sign, amp, sampleRate);
 
     // End-of-move overshoot: this step is a return move when the previous
@@ -230,7 +237,7 @@ export function stepResponseMetrics(
     settlingTimeMs: settleSum / used,
     latencyMs: latencySum / used,
     ringingCycles: ringingSum / used,
-    steadyStateErrorPercent: sseSum / used,
+    steadyStateErrorPercent: sseCount > 0 ? sseSum / sseCount : 0,
     ffStartLagMs: ffLagSum / used,
     ffEndOvershootPercent: ffEndCount > 0 ? ffEndSum / ffEndCount : null,
     stepCount: used,
@@ -358,14 +365,26 @@ function ringing(resp: Float64Array): number {
   return Math.floor(cycles);
 }
 
-/** Mean |response − 1| over the second half of the plateau hold, in % — the
- *  first half still contains the rise/catch-up, which is not steady-state. */
-function steadyStateError(resp: Float64Array, step: StepWindow, sampleRate: number): number {
-  void sampleRate;
+/**
+ * Mean |response − 1| over the settled part of the plateau hold, in %. The
+ * window starts once the response has reached 90 % (plus 10 ms) and never
+ * before the second half of the hold — the rise itself is not steady state.
+ * Null when the hold is too short to contain a settled stretch (short
+ * wiggles), so such steps do not drag the average.
+ */
+function steadyStateError(resp: Float64Array, step: StepWindow, sampleRate: number): number | null {
   const holdFrom = Math.max(0, step.plateauStart - step.start);
   const holdTo = Math.min(resp.length, step.plateauEnd - step.start);
-  const from = holdFrom + Math.floor((holdTo - holdFrom) / 2);
-  if (holdTo - from < 4) return 0;
+  let i90 = -1;
+  for (let j = 0; j < holdTo; j++) {
+    if (resp[j]! >= 0.9) {
+      i90 = j;
+      break;
+    }
+  }
+  if (i90 === -1) return null;
+  const from = Math.max(holdFrom + Math.floor((holdTo - holdFrom) / 2), i90 + Math.round(0.01 * sampleRate));
+  if (holdTo - from < 4) return null;
   let sum = 0;
   for (let j = from; j < holdTo; j++) sum += Math.abs(resp[j]! - 1);
   return (sum / (holdTo - from)) * 100;

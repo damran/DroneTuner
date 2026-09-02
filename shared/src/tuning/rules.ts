@@ -2,6 +2,7 @@ import type { Axis, PidTerms, ProfileSettings } from "../types/fc";
 import { AXES } from "../types/fc";
 import type { Finding, LogMetrics, Recommendation } from "../analysis/types";
 import { BF45_FILTER_DEFAULTS } from "../analysis/delay";
+import { hasStepEvidence, stepEvidenceNote } from "../analysis/stepresponse";
 import { settingsToCli } from "./cli";
 
 /**
@@ -281,6 +282,72 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
     });
   }
 
+  // motor_poles sanity check: every RPM notch is placed from eRPM and the
+  // pole count. If the strongest motor-like line sits where another pole
+  // count predicts it, the notches are all off by that ratio and the
+  // fundamental leaks straight through.
+  const poleCheck = metrics.motorPoleCheck;
+  if (poleCheck && poleCheck.status === "mismatch" && poleCheck.suggestedPoles) {
+    const offPct = Math.abs(1 - poleCheck.headerPoles / poleCheck.suggestedPoles) * 100;
+    const finding: Finding = {
+      id: "motor-poles",
+      severity: "warning",
+      title: "RPM estimate does not match measured motor peak",
+      detail: `The strongest motor-like peak sits at ${Math.round(poleCheck.peakHz ?? 0)} Hz, ${(poleCheck.ratio ?? 0).toFixed(2)}× the eRPM-derived motor frequency (motor_poles ${poleCheck.headerPoles}). With ${poleCheck.suggestedPoles} poles it would be exactly the ${ordinal(poleCheck.harmonic ?? 1)} harmonic${poleCheck.aliased ? " (folded at the log rate)" : ""}. A wrong pole count puts every RPM notch ${offPct.toFixed(0)}% off frequency, so the motor fundamental is not filtered at all. Count the magnets on one bell (9N12P whoop motors have 12) before changing it.`,
+    };
+    findings.push(finding);
+    recommendations.push({
+      id: `rec-${recommendations.length + 1}`,
+      findingId: finding.id,
+      rationale: `Set motor_poles to ${poleCheck.suggestedPoles} so the RPM filter tracks the measured motor lines.`,
+      changes: {},
+      score: 0.9,
+      cliLines: [`set motor_poles = ${poleCheck.suggestedPoles}`, "save"],
+    });
+  } else if (poleCheck && poleCheck.status === "consistent") {
+    findings.push({
+      id: "motor-poles-ok",
+      severity: "info",
+      title: `Motor pole count confirmed (motor_poles ${poleCheck.headerPoles})`,
+      detail: `A ${(poleCheck.ratioToFloor ?? 0).toFixed(0)}× peak at ${Math.round(poleCheck.peakHz ?? 0)} Hz sits on the ${ordinal(poleCheck.harmonic ?? 1)} motor harmonic (${(poleCheck.ratio ?? 1).toFixed(2)}× the eRPM estimate${poleCheck.aliased ? ", folded at the log rate" : ""}), so the RPM filter is aimed correctly.`,
+    });
+  }
+
+  // Motor harmonics above the log's Nyquist fold back into the spectrum.
+  // They are motor noise the log rate cannot display, not a resonance at
+  // the folded frequency — say so before anyone aims a notch at it.
+  const aliased = (metrics.spectral ?? [])
+    .flatMap((sp) => sp.peaks.map((pk) => ({ axis: sp.axis, ...pk })))
+    .filter((pk) => pk.kind === "motorHarmonic" && pk.aliased && pk.ratioToFloor > 4)
+    .sort((a, b) => b.ratioToFloor - a.ratioToFloor);
+  if (aliased.length > 0 && metrics.sampleRateHz > 0) {
+    const strongest = aliased[0]!;
+    const logRate = metrics.sampleRateHz;
+    const pidRate = metrics.pidLoopRateHz ?? null;
+    const interval = pidRate ? Math.round(pidRate / logRate) : null;
+    const finding: Finding = {
+      id: "aliased-motor-noise",
+      severity: "info",
+      title: `Motor harmonic folded by the ${Math.round(logRate)} Hz log rate (${Math.round(strongest.freqHz)} Hz)`,
+      detail: `The ${ordinal(strongest.harmonic ?? 2)} motor harmonic lies above this log's Nyquist (${Math.round(logRate / 2)} Hz) and appears mirrored at ${Math.round(strongest.freqHz)} Hz on ${AXIS_LABEL[strongest.axis]} (${strongest.ratioToFloor.toFixed(0)}× the floor). It is not a frame resonance and no notch belongs there; the RPM filter handles it (more harmonics or a wider Q if it is strong). ${
+        interval && interval >= 4
+          ? `Log every 2nd PID loop (blackbox_sample_rate 1/2, ${Math.round((pidRate ?? 0) / 2)} Hz) to see the motor band at its true frequency.`
+          : "Log at a higher rate to see the motor band at its true frequency."
+      }`,
+    };
+    findings.push(finding);
+    if (interval && interval >= 4) {
+      recommendations.push({
+        id: `rec-${recommendations.length + 1}`,
+        findingId: finding.id,
+        rationale: "Double the blackbox rate so motor harmonics up to the 3rd stay below Nyquist.",
+        changes: {},
+        score: 0.4,
+        cliLines: ["set blackbox_sample_rate = 1/2", "save"],
+      });
+    }
+  }
+
   // ------------------------------------------------------------------
   // 1. Noise sources: frame resonances (fixed frequency) vs motor harmonics
   //    (throttle-swept). Only fixed-frequency peaks may steer the dynamic
@@ -425,17 +492,38 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
       }
     }
 
-    // Motor harmonics visible in the FILTERED gyro mean the RPM notches are
-    // too narrow (or the pole count is wrong) — widen them; never tighten.
+    // A harmonic above rpm_filter_harmonics is simply not notched yet — add
+    // the harmonic before touching Q. (BF 4.5 caps at 3.)
+    const baseHarmonics = baseFilters.rpmFilterHarmonics ?? 3;
+    const unnotched = motorPeaks.filter((p) => p.harmonic !== undefined && p.harmonic > baseHarmonics && p.harmonic <= 3);
+    if (unnotched.length > 0) {
+      const top = unnotched.reduce((a, b) => (a.harmonic! > b.harmonic! ? a : b));
+      add(
+        {
+          id: "rpm-harmonics",
+          severity: top.ratioToFloor > 8 ? "warning" : "info",
+          title: `${ordinal(top.harmonic!)} motor harmonic is not notched (rpm_filter_harmonics ${baseHarmonics})`,
+          detail: `A ${top.ratioToFloor.toFixed(1)}× peak sits on the ${ordinal(top.harmonic!)} motor harmonic${top.aliased ? ` (folded to ${Math.round(top.freqHz)} Hz by the log rate)` : ` at ${Math.round(top.freqHz)} Hz`}, above the ${baseHarmonics} harmonic${baseHarmonics === 1 ? "" : "s"} the RPM filter covers. Each extra harmonic costs a little delay but removes a whole motor line.`,
+        },
+        { filters: { rpmFilterHarmonics: top.harmonic! - baseHarmonics } },
+        `Notch ${top.harmonic} motor harmonics so the ${ordinal(top.harmonic!)} is filtered too.`,
+        0.7,
+      );
+    }
+
+    // Motor harmonics that ARE covered yet still visible in the FILTERED gyro
+    // mean the RPM notches are too narrow (or the pole count is wrong) —
+    // widen them; never tighten.
     const baseQ = baseFilters.rpmFilterQ ?? 500;
-    const strongestMotor = motorPeaks.reduce((a, b) => (a.ratioToFloor > b.ratioToFloor ? a : b));
-    if (baseQ > 300) {
+    const leaking = motorPeaks.filter((p) => p.harmonic === undefined || p.harmonic <= baseHarmonics);
+    const strongestMotor = leaking.length > 0 ? leaking.reduce((a, b) => (a.ratioToFloor > b.ratioToFloor ? a : b)) : null;
+    if (strongestMotor && baseQ > 300) {
       add(
         {
           id: "rpm-q",
           severity: strongestMotor.ratioToFloor > 8 ? "warning" : "info",
           title: `Motor noise leaks past the RPM notches (${Math.round(strongestMotor.freqHz)} Hz, ${strongestMotor.ratioToFloor.toFixed(1)}× floor)`,
-          detail: `Throttle-tracking peaks in the filtered gyro mean the RPM notches (Q ${baseQ}) are narrower than the motor noise. Widen them (lower Q) in 100 steps, and double-check motor_poles (12 for 07xx/08xx/11xx whoop motors, 14 for 1103-1404) — a wrong pole count puts every notch at the wrong frequency.`,
+          detail: `${strongestMotor.harmonic ? `The ${ordinal(strongestMotor.harmonic)} motor harmonic${strongestMotor.aliased ? " (folded by the log rate)" : ""}` : "A throttle-tracking peak"} is still visible in the filtered gyro, so the RPM notches (Q ${baseQ}) are narrower than the motor noise. Widen them (lower Q) in 100 steps, and double-check motor_poles (12 for 07xx/08xx/11xx whoop motors, 14 for 1103-1404) — a wrong pole count puts every notch at the wrong frequency.`,
         },
         { filters: { rpmFilterQ: -Math.min(100, baseQ - 300) } },
         "Wider RPM notches so the motor harmonics are actually removed (CLI-only on BF 4.4/4.5). Tighten again later only if the filtered gyro stays clean.",
@@ -446,11 +534,15 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
     // Per-harmonic weights from the observed harmonic pattern (Rosser:
     // tri-blade ≈ 100,0,80 — almost no 2nd harmonic; bi-blade keeps the 2nd).
     const fundamental = motorPeaks.reduce((a, b) => (a.freqHz < b.freqHz ? a : b));
-    const h2 = motorPeaks.find(
-      (p) => Math.abs(p.freqHz / fundamental.freqHz - 2) < 0.2 && p.ratioToFloor > 4,
-    );
+    const known = motorPeaks.some((p) => p.harmonic !== undefined);
+    const h2 = known
+      ? motorPeaks.find((p) => p.harmonic === 2 && p.ratioToFloor > 4)
+      : motorPeaks.find((p) => Math.abs(p.freqHz / fundamental.freqHz - 2) < 0.2 && p.ratioToFloor > 4);
     const baseW2 = baseFilters.rpmFilterWeight2 ?? 100;
-    if (!h2 && baseW2 > 0) {
+    // The filtered gyro cannot show a 2nd harmonic the RPM filter already
+    // notches, so with eRPM-identified harmonics this rule has no evidence
+    // to stand on; it only runs on the legacy throttle-correlation path.
+    if (!h2 && baseW2 > 0 && !known && baseHarmonics >= 2) {
       add(
         {
           id: "rpm-weights",
@@ -586,7 +678,9 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
   //    FF from start lag / end overshoot
   // ------------------------------------------------------------------
   for (const sr of metrics.stepResponse) {
-    if (sr.stepCount < 3) continue;
+    // Explicit steps or enough deconvolution windows — a couple of stick
+    // flicks are not evidence either way.
+    if (!hasStepEvidence(sr)) continue;
     const axis = sr.axis;
     const label = AXIS_LABEL[axis];
     const basePid = effectiveBase.pids![axis]!;
@@ -706,6 +800,17 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
     }
   }
 
+  // Say where the step numbers come from (explicit stick steps vs system
+  // identification), so a finding can be judged against its evidence.
+  for (const f of findings) {
+    const m = /^(overshoot|slow|iterm|ff-lag|ff-boost|ff-end)-(roll|pitch|yaw)$/.exec(f.id);
+    if (!m) continue;
+    const sr = metrics.stepResponse.find((s) => s.axis === m[2]);
+    if (sr && !f.detail.includes("stick step") && !f.detail.includes("system identification")) {
+      f.detail = `${f.detail} Measured by ${stepEvidenceNote(sr)}.`;
+    }
+  }
+
   // ------------------------------------------------------------------
   // 6. Motor saturation
   // ------------------------------------------------------------------
@@ -812,11 +917,14 @@ function collectResonances(metrics: LogMetrics): Resonance[] {
   return groups.sort((a, b) => b.ratio - a.ratio).slice(0, 3);
 }
 
-function collectMotorPeaks(metrics: LogMetrics): { freqHz: number; ratioToFloor: number }[] {
+function collectMotorPeaks(
+  metrics: LogMetrics,
+): { freqHz: number; ratioToFloor: number; harmonic?: number; aliased?: boolean }[] {
   if (!metrics.spectral) return [];
   return metrics.spectral
     .flatMap((s) => s.peaks)
     .filter((p) => p.kind === "motorHarmonic" && p.ratioToFloor > 4)
+    .map((p) => ({ freqHz: p.freqHz, ratioToFloor: p.ratioToFloor, harmonic: p.harmonic, aliased: p.aliased }))
     .sort((a, b) => a.freqHz - b.freqHz);
 }
 
@@ -849,4 +957,9 @@ function pickTouched(resolved: ProfileSettings, changes: ProfileSettings): Profi
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
+}
+
+function ordinal(n: number): string {
+  const suffix = n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th";
+  return `${n}${suffix}`;
 }

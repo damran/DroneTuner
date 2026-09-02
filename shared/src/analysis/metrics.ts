@@ -1,8 +1,17 @@
 import type { ParsedLog } from "../blackbox/types";
 import { median } from "./fft";
 import { computeRatesUsage } from "./rates";
-import { detectSteps, stepResponseMetrics } from "./steps";
-import { airborneMask, classifyPeaks, computeSpectrogram, meanErpmHzChannel, type AxisSpectral } from "./spectrogram";
+import { analyzeAxisStepResponse } from "./stepresponse";
+import {
+  airborneMask,
+  classifyPeaks,
+  computeSpectrogram,
+  estimateIdleFloorHz,
+  motorHzChannels,
+  motorPolesFromHeaders,
+  type AxisSpectral,
+  type MotorPoleCheck,
+} from "./spectrogram";
 import { estimateFilterDelay, filterConfigFromHeaders } from "./delay";
 import type { AxisStepMetrics, LogMetrics, NoisePeak } from "./types";
 import { AXES, type Axis } from "../types/fc";
@@ -114,7 +123,10 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
 
   const mask = airborneMask(log);
   const throttle = throttleChannel(log);
-  const erpmHz = meanErpmHzChannel(log);
+  const motorsHz = motorHzChannels(log);
+  const erpmHz = motorsHz ? meanOfChannels(motorsHz) : null;
+  const idleFloorHz = estimateIdleFloorHz(log.headers, motorsHz);
+  const headerPoles = motorsHz ? motorPolesFromHeaders(log.headers) : null;
 
   const noisePeaks: NoisePeak[] = [];
   const noiseFloor = { roll: 0, pitch: 0, yaw: 0 } as Record<Axis, number>;
@@ -158,8 +170,17 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
         mask,
         throttle,
         erpmHz: erpmHz ?? undefined,
+        motorsHz: motorsHz ?? undefined,
       });
-      const spec = classifyPeaks(axis, sg, { minFreqHz: 40, maxFreqHz: Math.min(nyquist, 800) });
+      // Peaks are looked for up to the log's Nyquist: with eRPM the classifier
+      // recognises folded motor harmonics there, and cutting at 800 Hz would
+      // hide exactly the high-throttle ridges a 2 kHz log shows.
+      const spec = classifyPeaks(axis, sg, {
+        minFreqHz: 40,
+        maxFreqHz: Math.min(nyquist, motorsHz ? 1000 : 800),
+        idleFloorHz,
+        headerPoles,
+      });
       spectral.push(spec);
       noiseFloor[axis] = spec.floor;
       for (const p of spec.peaks) {
@@ -168,10 +189,7 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
 
       const setpoint = channel(log, `setpoint[${idx}]`);
       if (setpoint && setpoint.length > 256) {
-        const steps = detectSteps(setpoint, sampleRate);
-        const m = stepResponseMetrics(gyro, setpoint, steps, sampleRate);
-        m.axis = axis;
-        stepResponse.push(m);
+        stepResponse.push(analyzeAxisStepResponse(axis, gyro, setpoint, sampleRate, { mask }).metrics);
       }
     }
 
@@ -356,6 +374,17 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
     return Object.keys(out).length > 0 ? out : null;
   })();
 
+  // Strongest pole-count evidence across axes: a confirmed harmonic beats a
+  // mismatch candidate (a wrong pole count leaves no integer harmonics).
+  const poleChecks = spectral.map((s) => s.motorPoleCheck).filter((c): c is MotorPoleCheck => !!c);
+  const pickStrongest = (status: MotorPoleCheck["status"]) =>
+    poleChecks
+      .filter((c) => c.status === status)
+      .sort((a, b) => (b.ratioToFloor ?? 0) - (a.ratioToFloor ?? 0))[0] ?? null;
+  const motorPoleCheck: MotorPoleCheck | null = !motorsHz
+    ? null
+    : (pickStrongest("consistent") ?? pickStrongest("mismatch") ?? poleChecks[0] ?? null);
+
   const ratesUsage = computeRatesUsage(log);
   if (!ratesUsage) {
     warnings.push("No setpoint channels in this log — rates usage analysis unavailable.");
@@ -383,9 +412,21 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
     gyroRateHz: gyroRateHz ? Math.round(gyroRateHz) : null,
     pidLoopRateHz: pidLoopRateHz ? Math.round(pidLoopRateHz) : null,
     flownConfig: { filters: flownFilters, pids: flownPids, advanced: flownAdvanced },
+    motorPoleCheck,
     ratesUsage,
     warnings,
   };
+}
+
+function meanOfChannels(channels: Float32Array[]): Float32Array {
+  const n = Math.min(...channels.map((c) => c.length));
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    for (const c of channels) s += c[i]!;
+    out[i] = s / channels.length;
+  }
+  return out;
 }
 
 function parseMotorMax(log: ParsedLog): number {

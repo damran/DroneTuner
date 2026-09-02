@@ -8,11 +8,12 @@ import { parseBlackboxLog } from "@dronetuner/shared/blackbox";
 import type { PeakKind } from "@dronetuner/shared/analysis";
 import {
   airborneMask,
-  averageStepResponse,
+  analyzeAxisStepResponse,
   classifyPeaks,
   computeSpectrogram,
-  detectSteps,
-  meanErpmHzChannel,
+  estimateIdleFloorHz,
+  motorHzChannels,
+  motorPolesFromHeaders,
   scaledGyroChannel,
   throttleChannel,
 } from "@dronetuner/shared/analysis";
@@ -32,6 +33,10 @@ export interface StepSeries {
   axis: AxisName;
   tMs: number[];
   response: number[];
+  /** same selection as the server metrics: explicit steps or deconvolution */
+  method: "steps" | "deconvolution";
+  /** steps averaged (method "steps") or windows used (method "deconvolution") */
+  count: number;
 }
 
 export interface SpectrumPeak {
@@ -146,14 +151,22 @@ ctx.onmessage = (e) => {
       });
     }
 
+    const mask = airborneMask(parsed);
     const stepSeries: StepSeries[] = [];
     for (let i = 0; i < AXES.length; i++) {
       const gyro = scaledGyroChannel(parsed, i);
       const setpoint = parsed.channels[`setpoint[${i}]`];
       if (!gyro || !setpoint || sampleRate <= 0) continue;
-      const steps = detectSteps(setpoint, sampleRate);
-      const avg = averageStepResponse(gyro, setpoint, steps, sampleRate);
-      if (avg) stepSeries.push({ axis: AXES[i]!, tMs: avg.tMs, response: avg.response });
+      const { metrics, curve } = analyzeAxisStepResponse(AXES[i]!, gyro, setpoint, sampleRate, { mask });
+      if (curve) {
+        stepSeries.push({
+          axis: AXES[i]!,
+          tMs: curve.tMs,
+          response: curve.response,
+          method: metrics.method ?? "steps",
+          count: metrics.method === "deconvolution" ? (metrics.windowCount ?? 0) : metrics.stepCount,
+        });
+      }
     }
 
     ctx.postMessage({ type: "progress", stage: "Computing noise spectrum…" });
@@ -161,9 +174,10 @@ ctx.onmessage = (e) => {
     // server-side findings come from, so the chart and the findings agree.
     // (A single mid-flight FFT smears throttle-swept motor ridges into
     // fake "peaks"; the spectrogram keeps them separate.)
-    const mask = airborneMask(parsed);
     const throttle = throttleChannel(parsed);
-    const erpmHz = meanErpmHzChannel(parsed);
+    const motorsHz = motorHzChannels(parsed);
+    const idleFloorHz = estimateIdleFloorHz(parsed.headers, motorsHz);
+    const headerPoles = motorsHz ? motorPolesFromHeaders(parsed.headers) : null;
     const spectrum: SpectrumSeries[] = [];
     for (let i = 0; i < AXES.length; i++) {
       const gyro = scaledGyroChannel(parsed, i);
@@ -171,7 +185,7 @@ ctx.onmessage = (e) => {
       const sg = computeSpectrogram(gyro, sampleRate, {
         mask,
         throttle,
-        erpmHz: erpmHz ?? undefined,
+        motorsHz: motorsHz ?? undefined,
       });
       if (sg.rows.length === 0) continue;
       const bins = sg.rows[0]!.mags.length;
@@ -189,7 +203,9 @@ ctx.onmessage = (e) => {
       }
       const classified = classifyPeaks(AXES[i]!, sg, {
         minFreqHz: 40,
-        maxFreqHz: Math.min(800, sampleRate / 2),
+        maxFreqHz: Math.min(motorsHz ? 1000 : 800, sampleRate / 2),
+        idleFloorHz,
+        headerPoles,
       });
       spectrum.push({
         axis: AXES[i]!,

@@ -63,3 +63,48 @@ describe("computeMetrics rpm filter detection", () => {
     expect(computeMetrics(makeLog({ headers: { dshot_bidir: "0", debug_mode: "0" } })).rpmFilterActive).toBe(false);
   });
 });
+
+describe("computeMetrics step response", () => {
+  it("falls back to deconvolution on a smooth flight without stick plateaus", () => {
+    // 60 s at 1 kHz: a low-passed random stick trace through a 2nd-order
+    // loop — no plateau is ever held, so the edge detector finds (almost)
+    // nothing, yet the deconvolution estimate is available.
+    const sr = 1000;
+    const n = sr * 60;
+    const setpoint = new Float32Array(n);
+    const gyro = new Float32Array(n);
+    let seed = 99;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296 - 0.5;
+    let walk = 0;
+    let lp = 0;
+    const a = Math.exp((-2 * Math.PI * 3) / sr);
+    for (let i = 0; i < n; i++) {
+      walk += rnd() * 40;
+      walk *= 0.995;
+      if (i % 1700 === 0) walk += rnd() * 600;
+      lp = a * lp + (1 - a) * walk;
+      setpoint[i] = lp;
+    }
+    const wn = 2 * Math.PI * 8;
+    let y = 0;
+    let v = 0;
+    for (let i = 0; i < n; i++) {
+      const u = i >= 8 ? setpoint[i - 8]! : 0;
+      v += (wn * wn * (u - y) - 2 * 0.6 * wn * v) / sr;
+      y += v / sr;
+      gyro[i] = y + rnd() * 20;
+    }
+    const log = makeLog({ channels: { "rcCommand[3]": new Float32Array(n).fill(1500), "setpoint[0]": setpoint, "gyroADC[0]": gyro } });
+    log.timeUs = Float32Array.from({ length: n }, (_, i) => i * 1000);
+    log.frameCount = n;
+    const m = computeMetrics(log);
+    const roll = m.stepResponse.find((s) => s.axis === "roll");
+    expect(roll).toBeDefined();
+    expect(roll!.method).toBe("deconvolution");
+    expect(roll!.windowCount).toBeGreaterThan(10);
+    expect(roll!.overshootPercent).toBeGreaterThan(3);
+    expect(roll!.overshootPercent).toBeLessThan(20);
+    expect(roll!.riseTimeMs).toBeGreaterThan(25);
+    expect(roll!.riseTimeMs).toBeLessThan(50);
+  });
+});

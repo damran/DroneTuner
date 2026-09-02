@@ -451,7 +451,16 @@ function TracesView({ data }: { data: TracesResult }) {
       {data.stepSeries.length > 0 && (
         <Card>
           <CardHeader className="p-4">
-            <CardTitle className="text-sm">Step response (normalized, averaged over stick steps)</CardTitle>
+            <CardTitle className="text-sm">Step response (normalized)</CardTitle>
+            <p className="text-xs text-muted-foreground">
+              {data.stepSeries
+                .map((s) =>
+                  s.method === "deconvolution"
+                    ? `${s.axis}: system identification over ${s.count} windows`
+                    : `${s.axis}: ${s.count} stick step${s.count === 1 ? "" : "s"}`,
+                )
+                .join(" · ")}
+            </p>
           </CardHeader>
           <CardContent className="p-2">
             <UplotChart

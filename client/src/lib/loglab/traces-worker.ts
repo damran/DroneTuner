@@ -15,6 +15,7 @@ import {
   motorHzChannels,
   motorPolesFromHeaders,
   scaledGyroChannel,
+  scaledRawGyroChannel,
   throttleChannel,
 } from "@dronetuner/shared/analysis";
 
@@ -49,6 +50,8 @@ export interface SpectrumSeries {
   freqs: number[];
   mags: number[];
   peaks: SpectrumPeak[];
+  /** "raw" = gyroUnfilt (what the filters have to remove), "filtered" = gyroADC (what leaks through) */
+  source: "raw" | "filtered";
 }
 
 export interface TracesResult {
@@ -178,41 +181,47 @@ ctx.onmessage = (e) => {
     const motorsHz = motorHzChannels(parsed);
     const idleFloorHz = estimateIdleFloorHz(parsed.headers, motorsHz);
     const headerPoles = motorsHz ? motorPolesFromHeaders(parsed.headers) : null;
+    // Both views Rosser's filter method compares: the raw gyro (Betaflight
+    // 4.5 logs gyroUnfilt on every log) shows the noise the filters must
+    // remove, the filtered gyro what still gets through.
     const spectrum: SpectrumSeries[] = [];
     for (let i = 0; i < AXES.length; i++) {
-      const gyro = scaledGyroChannel(parsed, i);
-      if (!gyro || gyro.length < 256 || sampleRate <= 0) continue;
-      const sg = computeSpectrogram(gyro, sampleRate, {
-        mask,
-        throttle,
-        motorsHz: motorsHz ?? undefined,
-      });
-      if (sg.rows.length === 0) continue;
-      const bins = sg.rows[0]!.mags.length;
-      const avg = new Float64Array(bins);
-      for (const row of sg.rows) {
-        for (let b = 0; b < bins; b++) avg[b] += row.mags[b]!;
+      for (const source of ["raw", "filtered"] as const) {
+        const gyro = source === "raw" ? scaledRawGyroChannel(parsed, i) : scaledGyroChannel(parsed, i);
+        if (!gyro || gyro.length < 256 || sampleRate <= 0) continue;
+        const sg = computeSpectrogram(gyro, sampleRate, {
+          mask,
+          throttle,
+          motorsHz: motorsHz ?? undefined,
+        });
+        if (sg.rows.length === 0) continue;
+        const bins = sg.rows[0]!.mags.length;
+        const avg = new Float64Array(bins);
+        for (const row of sg.rows) {
+          for (let b = 0; b < bins; b++) avg[b] += row.mags[b]!;
+        }
+        const freqs: number[] = [];
+        const mags: number[] = [];
+        for (let b = 1; b < bins; b++) {
+          const f = sg.rows[0]!.freqs[b]!;
+          if (f > 600) break;
+          freqs.push(Number(f.toFixed(1)));
+          mags.push(Number((avg[b]! / sg.rows.length).toFixed(2)));
+        }
+        const classified = classifyPeaks(AXES[i]!, sg, {
+          minFreqHz: 40,
+          maxFreqHz: Math.min(motorsHz ? 1000 : 800, sampleRate / 2),
+          idleFloorHz,
+          headerPoles,
+        });
+        spectrum.push({
+          axis: AXES[i]!,
+          freqs,
+          mags,
+          peaks: classified.peaks.map((p) => ({ freqHz: Math.round(p.freqHz), kind: p.kind })),
+          source,
+        });
       }
-      const freqs: number[] = [];
-      const mags: number[] = [];
-      for (let b = 1; b < bins; b++) {
-        const f = sg.rows[0]!.freqs[b]!;
-        if (f > 600) break;
-        freqs.push(Number(f.toFixed(1)));
-        mags.push(Number((avg[b]! / sg.rows.length).toFixed(2)));
-      }
-      const classified = classifyPeaks(AXES[i]!, sg, {
-        minFreqHz: 40,
-        maxFreqHz: Math.min(motorsHz ? 1000 : 800, sampleRate / 2),
-        idleFloorHz,
-        headerPoles,
-      });
-      spectrum.push({
-        axis: AXES[i]!,
-        freqs,
-        mags,
-        peaks: classified.peaks.map((p) => ({ freqHz: Math.round(p.freqHz), kind: p.kind })),
-      });
     }
 
     ctx.postMessage({

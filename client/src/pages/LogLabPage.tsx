@@ -457,6 +457,11 @@ function MetricsCards({ analysis }: { analysis: Analysis }) {
 
 /** Pure renderer — all parsing/FFT/step math arrived chart-ready from the worker. */
 function TracesView({ data }: { data: TracesResult }) {
+  // Rosser's filter view: the raw gyro shows what the filters have to remove,
+  // the filtered gyro what still leaks through.
+  const hasRaw = data.spectrum.some((s) => s.source === "raw");
+  const [spectrumSource, setSpectrumSource] = useState<"raw" | "filtered">(hasRaw ? "raw" : "filtered");
+  const shownSpectrum = data.spectrum.filter((s) => s.source === (hasRaw ? spectrumSource : "filtered"));
   const theme = useChartTheme();
   return (
     <div className="space-y-4">
@@ -508,15 +513,33 @@ function TracesView({ data }: { data: TracesResult }) {
         </Card>
       )}
 
-      {data.spectrum.length > 0 && (
+      {shownSpectrum.length > 0 && (
         <Card>
-          <CardHeader className="p-4">
-            <CardTitle className="text-sm">Gyro noise spectrum (airborne average)</CardTitle>
+          <CardHeader className="flex-row items-center justify-between p-4">
+            <CardTitle className="text-sm">
+              Gyro noise spectrum (airborne average, {spectrumSource === "raw" && hasRaw ? "raw gyro" : "filtered gyro"})
+            </CardTitle>
+            {hasRaw && (
+              <div className="flex gap-1">
+                {(["raw", "filtered"] as const).map((src) => (
+                  <Button
+                    key={src}
+                    size="sm"
+                    variant={spectrumSource === src ? "default" : "outline"}
+                    onClick={() => setSpectrumSource(src)}
+                  >
+                    {src === "raw" ? "Raw" : "Filtered"}
+                  </Button>
+                ))}
+              </div>
+            )}
           </CardHeader>
           <CardContent className="space-y-2 p-2">
-            <EChart option={buildSpectrumOption(data.spectrum, theme)} height={300} />
+            <EChart option={buildSpectrumOption(shownSpectrum, theme)} height={300} />
             <p className="px-2 text-xs text-muted-foreground">
-              Averaged over airborne spectrogram windows — the same analysis the findings use.
+              {spectrumSource === "raw" && hasRaw
+                ? "The pre-filter gyro (gyroUnfilt): the noise the filters must remove — motor lines for the RPM filter, fixed stripes for the dynamic notch (Rosser's frequency-vs-throttle view)."
+                : "The filtered gyro (gyroADC): what still gets through the filter chain — anything marked here is leaking."}{" "}
               Markers: <span className="text-warning">frame resonance → dynamic notch</span>,{" "}
               <span className="text-info">motor harmonic → RPM filter</span>,{" "}
               <span className="text-chart-2">idle-speed motor noise → rpm_filter_min_hz / dynamic idle</span>.
@@ -615,15 +638,18 @@ function FilterDelayCard({ analysis }: { analysis: Analysis }) {
   );
 }
 
-/** Classified noise sources: frame resonances (dyn notch) vs motor harmonics (RPM filter). */
+/** Classified noise sources: frame resonances (dyn notch) vs motor harmonics (RPM filter), raw and filtered. */
 function NoiseSourcesCard({ analysis }: { analysis: Analysis }) {
   const spectral = analysis.metrics.spectral;
   if (!spectral) return null;
+  const raw = analysis.metrics.spectralRaw;
   const rows = spectral.flatMap((s) =>
     s.peaks.map((p) => ({ axis: s.axis, ...p })),
   );
-  const onsets = spectral.map((s) => s.motorNoiseOnsetHz).filter((v): v is number => v !== null);
-  if (rows.length === 0 && onsets.length === 0) {
+  const rawRows = (raw ?? []).flatMap((s) => s.peaks.filter((p) => p.ratioToFloor > 4).map((p) => ({ axis: s.axis, ...p })));
+  const onsets = (raw ?? spectral).map((s) => s.motorNoiseOnsetHz).filter((v): v is number => v !== null);
+  const harmonics = (raw ?? []).map((s) => s.harmonicRatios).filter((h): h is [number, number, number] => !!h);
+  if (rows.length === 0 && rawRows.length === 0 && onsets.length === 0) {
     return (
       <Card>
         <CardContent className="p-4 text-sm text-muted-foreground">
@@ -637,7 +663,44 @@ function NoiseSourcesCard({ analysis }: { analysis: Analysis }) {
       <CardHeader className="p-4">
         <CardTitle className="text-sm">Noise sources (frequency vs throttle)</CardTitle>
       </CardHeader>
-      <CardContent className="p-4 pt-0">
+      <CardContent className="space-y-3 p-4 pt-0">
+        {raw && (
+          <div>
+            <p className="mb-1 text-xs font-medium">Raw gyro — what the filters have to remove</p>
+            {rawRows.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No motor line or frame stripe above 4× the floor in the raw gyro.</p>
+            ) : (
+              <div className="space-y-1">
+                {rawRows.map((p, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2 text-sm">
+                    <span className="capitalize">{p.axis}</span>
+                    <span>{Math.round(p.freqHz)} Hz</span>
+                    <span className="text-muted-foreground">{p.ratioToFloor.toFixed(0)}× floor</span>
+                    <span className={p.kind === "frameResonance" ? "text-warning" : p.kind === "motorHarmonic" ? "text-info" : "text-muted-foreground"}>
+                      {p.kind === "frameResonance"
+                        ? "frame stripe → dynamic notch"
+                        : p.kind === "motorHarmonic"
+                          ? `motor ${p.harmonic ? `${p.harmonic}${p.harmonic === 1 ? "st" : p.harmonic === 2 ? "nd" : "rd"} harmonic` : "line"}${p.aliased ? " (folded)" : ""} → RPM filter`
+                          : p.kind === "motorIdle"
+                            ? "idle-speed motor noise"
+                            : "unclassified"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {harmonics.length > 0 && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Motor harmonics 1st / 2nd / 3rd at{" "}
+                {[0, 1, 2].map((k) => Math.max(...harmonics.map((h) => h[k]!)).toFixed(0)).join(" / ")}× the floor (raw) — the
+                weights the RPM filter needs.
+              </p>
+            )}
+          </div>
+        )}
+        <div>
+          <p className="mb-1 text-xs font-medium">{raw ? "Filtered gyro — what still leaks through" : "Filtered gyro"}</p>
+          {rows.length === 0 && <p className="text-xs text-muted-foreground">Nothing above 4× the floor leaks through the filter chain.</p>}
         <div className="space-y-1">
           {rows.map((p, i) => (
             <div key={i} className="flex items-center justify-between gap-2 text-sm">
@@ -653,14 +716,15 @@ function NoiseSourcesCard({ analysis }: { analysis: Analysis }) {
                       : "text-muted-foreground"
                 }
               >
-                {p.kind === "frameResonance" ? "frame resonance → dyn notch" : p.kind === "motorHarmonic" ? "motor harmonic → RPM filter" : p.kind === "motorIdle" ? "idle-speed motor noise" : "unclassified"}
+                {p.kind === "frameResonance" ? "frame resonance leaks → notch not covering it" : p.kind === "motorHarmonic" ? "motor harmonic leaks → RPM notch too narrow / few" : p.kind === "motorIdle" ? "idle-speed motor noise" : "unclassified"}
               </span>
             </div>
           ))}
         </div>
+        </div>
         {onsets.length > 0 && (
-          <p className="mt-2 text-xs text-muted-foreground">
-            Motor noise onset ≈ {Math.round(Math.min(...onsets))} Hz — RPM filters should be at full strength
+          <p className="text-xs text-muted-foreground">
+            Motor noise onset ≈ {Math.round(Math.min(...onsets))} Hz{raw ? " (raw gyro)" : ""} — RPM filters should be at full strength
             just above this.
           </p>
         )}

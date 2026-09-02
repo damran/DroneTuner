@@ -5,6 +5,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useApplyStore } from "@/lib/apply-store";
+import { useAdvanced } from "@/lib/ui-store";
+import SimplifiedSliders from "./SimplifiedSliders";
 
 export default function ProfilesList({
   profiles,
@@ -18,6 +20,7 @@ export default function ProfilesList({
   onDuplicate?: (id: number) => void;
 }) {
   const start = useApplyStore((s) => s.start);
+  const advanced = useAdvanced();
 
   if (profiles.length === 0) {
     return <p className="text-sm text-muted-foreground">No profiles yet.</p>;
@@ -37,6 +40,11 @@ export default function ProfilesList({
               {p.source}
             </p>
           </CardHeader>
+          {advanced && (
+            <CardContent className="p-4 pt-0">
+              <SimplifiedSliders settings={p.settings} compact />
+            </CardContent>
+          )}
           <CardContent className="flex flex-wrap gap-2 p-4 pt-0">
             {droneId && (
               <Button

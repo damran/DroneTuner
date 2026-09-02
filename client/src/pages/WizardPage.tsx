@@ -21,6 +21,7 @@ import {
 import { estimateFilterDelay, filterConfigFromProfile } from "@dronetuner/shared/analysis";
 import { useMspStore } from "@/lib/msp";
 import { useAdvanced } from "@/lib/ui-store";
+import SimplifiedSliders from "@/components/SimplifiedSliders";
 import { apiGet, apiPost } from "@/lib/api";
 import { useApplyStore } from "@/lib/apply-store";
 import { Badge } from "@/components/ui/badge";
@@ -269,7 +270,7 @@ export default function WizardPage() {
         <div className="space-y-1">
           <Label>Drone</Label>
           <Select value={droneId} onValueChange={setDroneId}>
-            <SelectTrigger className="w-48">
+            <SelectTrigger className="w-72 max-w-full">
               <SelectValue placeholder="Select drone…" />
             </SelectTrigger>
             <SelectContent>
@@ -679,7 +680,12 @@ export default function WizardPage() {
               </CardHeader>
               <CardContent className="p-4">
                 {advanced ? (
-                  <SettingsTable settings={draftSettings} />
+                  <>
+                    <SettingsTable settings={draftSettings} />
+                    <div className="mt-3 rounded-md bg-muted/50 px-3 py-2">
+                      <SimplifiedSliders settings={draftSettings} />
+                    </div>
+                  </>
                 ) : (
                   <DraftSummary settings={draftSettings} />
                 )}

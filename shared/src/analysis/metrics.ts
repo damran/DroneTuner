@@ -37,6 +37,16 @@ export function scaledGyroChannel(log: ParsedLog, axisIndex: number): Float32Arr
   return log.gyroScale ? raw.map((v) => v * log.gyroScale!) : raw;
 }
 
+/**
+ * The pre-filter gyro (gyroUnfilt, logged by Betaflight 4.5 regardless of
+ * debug mode), scaled like gyroADC. Undefined on older logs.
+ */
+export function scaledRawGyroChannel(log: ParsedLog, axisIndex: number): Float32Array | undefined {
+  const raw = channel(log, `gyroUnfilt[${axisIndex}]`);
+  if (!raw || raw.length < 256) return undefined;
+  return log.gyroScale ? raw.map((v) => v * log.gyroScale!) : raw;
+}
+
 function sampleRateOf(log: ParsedLog): number {
   const t = log.timeUs;
   if (t.length < 8) return 0;
@@ -135,6 +145,7 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
   const dtermRmsHighThrottle = { roll: 0, pitch: 0, yaw: 0 } as Record<Axis, number>;
   const stepResponse: AxisStepMetrics[] = [];
   const spectral: AxisSpectral[] = [];
+  const spectralRaw: AxisSpectral[] = [];
 
   const nyquist = sampleRate / 2;
 
@@ -144,6 +155,7 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
   // see full throttle still get a meaningful split.
   let lowMask: Uint8Array | null = null;
   let highMask: Uint8Array | null = null;
+  let throttleBands: LogMetrics["throttleBands"] = null;
   if (throttle && mask) {
     const quartiles = throttleQuartiles(throttle, mask);
     if (quartiles) {
@@ -155,6 +167,9 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
         if (throttle[i]! <= quartiles.q1) lowMask[i] = 1;
         else if (throttle[i]! >= quartiles.q3) highMask[i] = 1;
       }
+      // rcCommand[3] is already 1000–2000; setpoint[3] is ~0–1000.
+      const toUs = (v: number) => (channel(log, "rcCommand[3]") ? v : 1000 + v);
+      throttleBands = { lowMaxUs: Math.round(toUs(quartiles.q1)), highMinUs: Math.round(toUs(quartiles.q3)) };
     }
   }
 
@@ -185,6 +200,29 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
       noiseFloor[axis] = spec.floor;
       for (const p of spec.peaks) {
         noisePeaks.push({ axis, freqHz: p.freqHz, magnitude: p.magnitude });
+      }
+
+      // Same analysis on the pre-filter gyro: the noise the filter chain has
+      // to remove (motor lines the RPM filter should notch, stripes the
+      // dynamic notch should cover). Classifying both sides is what lets the
+      // rules say "the notch works — push its Q" versus "no stripe at all —
+      // switch the notch off" (Rosser's filter method reads the raw view).
+      const rawGyro = scaledRawGyroChannel(log, idx);
+      if (rawGyro) {
+        const sgRaw = computeSpectrogram(rawGyro, sampleRate, {
+          mask,
+          throttle,
+          erpmHz: erpmHz ?? undefined,
+          motorsHz: motorsHz ?? undefined,
+        });
+        spectralRaw.push(
+          classifyPeaks(axis, sgRaw, {
+            minFreqHz: 40,
+            maxFreqHz: Math.min(nyquist, motorsHz ? 1000 : 800),
+            idleFloorHz,
+            headerPoles,
+          }),
+        );
       }
 
       const setpoint = channel(log, `setpoint[${idx}]`);
@@ -374,9 +412,34 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
     return Object.keys(out).length > 0 ? out : null;
   })();
 
-  // Strongest pole-count evidence across axes: a confirmed harmonic beats a
-  // mismatch candidate (a wrong pole count leaves no integer harmonics).
-  const poleChecks = spectral.map((s) => s.motorPoleCheck).filter((c): c is MotorPoleCheck => !!c);
+  // Header-only settings the rules read (never MSP-written).
+  const flownExtras = (() => {
+    const h = log.headers;
+    const int = (name: string) => {
+      const raw = h[name];
+      if (raw === undefined) return undefined;
+      const v = Number.parseInt(raw, 10);
+      return Number.isNaN(v) ? undefined : v;
+    };
+    const out: NonNullable<LogMetrics["flownExtras"]> = {};
+    const pidsumLimit = int("pidsum_limit");
+    const pidsumLimitYaw = int("pidsum_limit_yaw");
+    const rcSmoothingAutoFactor = int("rc_smoothing_auto_factor");
+    const absControlGain = int("abs_control_gain");
+    if (pidsumLimit !== undefined) out.pidsumLimit = pidsumLimit;
+    if (pidsumLimitYaw !== undefined) out.pidsumLimitYaw = pidsumLimitYaw;
+    if (rcSmoothingAutoFactor !== undefined) out.rcSmoothingAutoFactor = rcSmoothingAutoFactor;
+    if (absControlGain !== undefined) out.absControlGain = absControlGain;
+    return Object.keys(out).length > 0 ? out : undefined;
+  })();
+
+  // Strongest pole-count evidence across axes and both gyro views (the raw
+  // gyro shows the motor lines the filters remove, so its evidence is the
+  // stronger one): a confirmed harmonic beats a mismatch candidate (a wrong
+  // pole count leaves no integer harmonics).
+  const poleChecks = [...spectralRaw, ...spectral]
+    .map((s) => s.motorPoleCheck)
+    .filter((c): c is MotorPoleCheck => !!c);
   const pickStrongest = (status: MotorPoleCheck["status"]) =>
     poleChecks
       .filter((c) => c.status === status)
@@ -408,6 +471,9 @@ export function computeMetrics(log: ParsedLog): LogMetrics {
     filterLatencyMs,
     rpmFilterActive,
     spectral,
+    spectralRaw: spectralRaw.length > 0 ? spectralRaw : undefined,
+    throttleBands,
+    flownExtras,
     filterDelay,
     gyroRateHz: gyroRateHz ? Math.round(gyroRateHz) : null,
     pidLoopRateHz: pidLoopRateHz ? Math.round(pidLoopRateHz) : null,

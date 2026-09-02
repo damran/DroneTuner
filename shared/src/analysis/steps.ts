@@ -185,6 +185,7 @@ export function stepResponseMetrics(
   let ffLagSum = 0;
   let ffEndSum = 0;
   let ffEndCount = 0;
+  let peakTimeSum = 0;
   let used = 0;
 
   for (let s = 0; s < steps.length; s++) {
@@ -203,8 +204,15 @@ export function stepResponseMetrics(
     // Overshoot: peak beyond 1.0 while the setpoint holds at the plateau.
     const plateauLen = Math.max(1, step.plateauEnd - step.start);
     let peak = 0;
-    for (let j = 0; j < Math.min(plateauLen, len); j++) peak = Math.max(peak, resp[j]!);
+    let peakIdx = 0;
+    for (let j = 0; j < Math.min(plateauLen, len); j++) {
+      if (resp[j]! > peak) {
+        peak = resp[j]!;
+        peakIdx = j;
+      }
+    }
     overshootSum += Math.max(0, (peak - 1) * 100);
+    peakTimeSum += (peakIdx / sampleRate) * 1000;
 
     riseSum += riseTime(resp, sampleRate);
     settleSum += settlingTime(resp, sampleRate);
@@ -237,6 +245,7 @@ export function stepResponseMetrics(
     settlingTimeMs: settleSum / used,
     latencyMs: latencySum / used,
     ringingCycles: ringingSum / used,
+    peakTimeMs: peakTimeSum / used,
     steadyStateErrorPercent: sseCount > 0 ? sseSum / sseCount : 0,
     ffStartLagMs: ffLagSum / used,
     ffEndOvershootPercent: ffEndCount > 0 ? ffEndSum / ffEndCount : null,

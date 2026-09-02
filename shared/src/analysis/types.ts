@@ -30,6 +30,12 @@ export interface AxisStepMetrics {
   ffStartLagMs?: number;
   /** overshoot on return moves (end of a wiggle) — high means FF too high */
   ffEndOvershootPercent?: number | null;
+  /**
+   * Time from the step to the response peak (ms). Brian White (PIDtoolbox):
+   * a fast, sharp overshoot is a P:D-ratio problem, a slow drawn-out one is
+   * too much I-term. Absent in older analyses.
+   */
+  peakTimeMs?: number;
   /** explicit stick steps found by the edge detector */
   stepCount: number;
   /**
@@ -82,10 +88,39 @@ export interface LogMetrics {
   filterLatencyMs: number | null;
   rpmFilterActive: boolean;
   /**
-   * Per-axis time–frequency noise analysis (frame resonances vs motor
-   * harmonics). Absent in analyses persisted before the spectrogram existed.
+   * Per-axis time–frequency noise analysis of the FILTERED gyro (gyroADC):
+   * frame resonances vs motor harmonics that survive the filter chain —
+   * i.e. what still leaks through. Absent in analyses persisted before the
+   * spectrogram existed.
    */
   spectral?: AxisSpectral[];
+  /**
+   * The same analysis on the RAW, pre-filter gyro (gyroUnfilt, always logged
+   * by Betaflight 4.5): the noise the filters have to deal with. This is the
+   * view Chris Rosser's filter method reads (frequency-vs-throttle of the
+   * unfiltered gyro) — a stripe here that is absent in `spectral` means the
+   * dynamic notch is doing its job. Absent on logs without gyroUnfilt.
+   */
+  spectralRaw?: AxisSpectral[];
+  /**
+   * Airborne throttle quartile edges in rcCommand units (1000–2000): the
+   * low-throttle D-term band ends at `lowMaxUs`, the high-throttle band
+   * starts at `highMinUs`. Lets the TPA rule place the breakpoint "just
+   * below where the high-throttle noise starts". Null without a throttle
+   * channel; absent in older analyses.
+   */
+  throttleBands?: { lowMaxUs: number; highMinUs: number } | null;
+  /**
+   * Header-only settings the rules read but the settings model does not
+   * carry (they are never MSP-written): pidsum limits, RC smoothing auto
+   * factor, absolute control. Absent in older analyses.
+   */
+  flownExtras?: {
+    pidsumLimit?: number;
+    pidsumLimitYaw?: number;
+    rcSmoothingAutoFactor?: number;
+    absControlGain?: number;
+  };
   /**
    * Group-delay estimate of the configured filter chain (from log headers).
    * Absent in analyses persisted before the delay estimator existed.

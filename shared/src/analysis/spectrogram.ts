@@ -106,6 +106,14 @@ export interface AxisSpectral {
   motorNoiseStrongHz: number | null;
   /** motor_poles sanity check (absent when the log has no eRPM channels) */
   motorPoleCheck?: MotorPoleCheck | null;
+  /**
+   * Strength of the 1st, 2nd and 3rd motor harmonic at their expected
+   * (folded) frequency, as the median over rows of peak magnitude ÷ row
+   * floor. Measured directly from the eRPM prediction, so a harmonic that
+   * the peak picker never lists (the fundamental's skirt takes the slots)
+   * still gets a number. Absent without eRPM channels.
+   */
+  harmonicRatios?: [number, number, number];
 }
 
 /**
@@ -327,6 +335,7 @@ export function classifyPeaks(axis: Axis, sg: Spectrogram, options: ClassifyOpti
 
   // Per-row noise floor and prominent peaks.
   const rowFloors: number[] = [];
+  const rowFloorByIdx = new Map<number, number>();
   const rowPeaks: RowPeak[] = [];
   for (let rowIdx = 0; rowIdx < sg.rows.length; rowIdx++) {
     const row = sg.rows[rowIdx]!;
@@ -338,6 +347,7 @@ export function classifyPeaks(axis: Axis, sg: Spectrogram, options: ClassifyOpti
     if (band.length < 16) continue;
     const rowFloor = median(band);
     rowFloors.push(rowFloor);
+    rowFloorByIdx.set(rowIdx, rowFloor);
     const peaks = findPeaks(
       { freqs: row.freqs, magnitudes: row.mags, sampleRate: sg.sampleRate, binCount: row.mags.length },
       { minFreqHz, maxFreqHz, prominenceRatio, maxPeaks: 3, minSeparationHz: 15 },
@@ -548,7 +558,58 @@ export function classifyPeaks(axis: Axis, sg: Spectrogram, options: ClassifyOpti
       ? null
       : (poleConsistent ?? poleMismatch ?? { headerPoles, status: "unknown" });
 
-  return { axis, floor, peaks: top, motorNoiseOnsetHz: onset, motorNoiseStrongHz: strong ?? onset, motorPoleCheck };
+  const harmonicRatios = hasErpm ? measureHarmonicRatios(sg, rowFloorByIdx) : undefined;
+
+  return {
+    axis,
+    floor,
+    peaks: top,
+    motorNoiseOnsetHz: onset,
+    motorNoiseStrongHz: strong ?? onset,
+    motorPoleCheck,
+    ...(harmonicRatios ? { harmonicRatios } : {}),
+  };
+}
+
+/**
+ * Median over rows of (strongest magnitude within ±3 % of k × f_motor, folded
+ * at the log rate) ÷ the row's floor, for k = 1..3. This is how strong each
+ * motor harmonic is regardless of what the peak picker listed — the input
+ * for RPM-filter dimming (Rosser: 100,0,80 on tri-blades) and for judging
+ * leakage of a covered harmonic.
+ */
+function measureHarmonicRatios(sg: Spectrogram, rowFloorByIdx: Map<number, number>): [number, number, number] | undefined {
+  const nyquist = sg.sampleRate / 2;
+  const out: number[] = [];
+  for (let k = 1; k <= 3; k++) {
+    const ratios: number[] = [];
+    for (let rowIdx = 0; rowIdx < sg.rows.length; rowIdx++) {
+      const rowFloor = rowFloorByIdx.get(rowIdx);
+      const row = sg.rows[rowIdx]!;
+      if (!rowFloor || rowFloor <= 0) continue;
+      const fm =
+        row.motorsHz && row.motorsHz.length > 0
+          ? row.motorsHz.reduce((a, b) => a + b, 0) / row.motorsHz.length
+          : (row.erpmHz ?? 0);
+      if (!(fm > 0)) continue;
+      const h = k * fm;
+      // fold into 0..Nyquist (|h − n·f_s|)
+      let expected = h;
+      for (let n = 1; expected > nyquist && n <= 4; n++) expected = Math.abs(h - n * sg.sampleRate);
+      if (expected > nyquist) continue;
+      const tol = Math.min(25, Math.max(6, expected * 0.03));
+      let best = 0;
+      for (let b = 1; b < row.mags.length; b++) {
+        const f = row.freqs[b]!;
+        if (f < expected - tol || f > expected + tol) continue;
+        if (row.mags[b]! > best) best = row.mags[b]!;
+      }
+      ratios.push(best / rowFloor);
+    }
+    if (ratios.length < 4) return undefined;
+    out.push(median(ratios));
+  }
+  return out as [number, number, number];
 }
 
 interface ClusterMotorMatch {

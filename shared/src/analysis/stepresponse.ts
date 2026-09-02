@@ -315,6 +315,7 @@ export function analyzeAxisStepResponse(
     settlingTimeMs: deconv!.settlingTimeMs,
     latencyMs: deconv!.latencyMs,
     ringingCycles: deconv!.ringingCycles,
+    peakTimeMs: deconv!.peakTimeMs,
     steadyStateErrorPercent: hasSteps ? explicit.steadyStateErrorPercent : undefined,
     ffStartLagMs: hasSteps ? explicit.ffStartLagMs : undefined,
     ffEndOvershootPercent: hasSteps ? explicit.ffEndOvershootPercent : null,

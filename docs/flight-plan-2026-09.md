@@ -100,3 +100,32 @@ Before any A/B: `set dterm_notch_hz = 0` (the 235 Hz D notch), `set dyn_notch_mi
 
 - Upload every file in the Log Lab; each arm is one entry. Re-analyze if a session was analyzed before the evening update (the findings now include the pole check, folded harmonics and the deconvolution step response).
 - Look for: "Motor harmonic folded by the log rate" (should disappear at 2 kHz logging), "Motor pole count confirmed", the D-term noise per band, and the step response card's method and window count.
+
+## 5. After the masterclass review (2 September, night): the sequence and the new pairs
+
+The wizard now shows a **Tuning sequence** card per drone (log → filters → master → P:D → I and dynamic idle → feedforward → dynamic damping → rates, Rosser's order with Brian White's variant noted). Steps tick themselves when a log is analysed or a pair of that step is recorded; tick the rest yourself. Every pair below is written like section 1 (two PID profiles, fly A, land, stick command, fly B, upload) and labelled in the Log Lab.
+
+Before the PID pairs, once per drone (CLI):
+
+```
+set d_max_advance = 0
+set pidsum_limit = 1000
+set pidsum_limit_yaw = 1000
+set gyro_lpf2_static_hz = 1000
+save
+```
+
+(Rosser: advance always 0; pidsum 1000 is optional and only while the motors are not saturating — UAV Tech's and Karate's whoop presets use it; LPF2 1000 is his rule for 8k gyro / 4k PID and his own AOS 65mm preset.)
+
+Pairs, one pack each, in this order:
+
+1. **Balanced vs Crisp** (section 1) — the D-term filter step. If the D-term is quiet in both throttle bands the Log Lab says so ("D-term is quiet — the D-term filtering has headroom").
+2. **Master 1.0 vs 1.15** — P, I, D, D-min and FF ×1.15. Motors first, then rise time without new ringing. Fly it on a fresh pack (latency is voltage-sensitive).
+3. **Tracking 1.0 vs 1.1** — P and I ×1.1, D unchanged. Per axis: faster rise, at most a hair of overshoot; ringing on B = past the optimum. For Rosser's clean sweep set FF 0, I low and D-max 0 on both sides first (the wizard does not do that for you).
+4. **Dynamic idle 2500 vs 6000 rpm** — propwash and low-throttle stability against descent authority. The idle line moves from 42 Hz (unfiltered) to 100 Hz (inside the RPM filter). 10000 rpm (Rosser's AOS 65mm, Mobula6 V3) is the next pair if B wins.
+5. **Feedforward 0 vs 50/50/45** (outdoor) — judge on the raw setpoint/gyro trace in the Log Lab, not on the step card: with the 500 Hz link the step tool exaggerates FF overshoot (Brian White).
+6. Optional: **Karate vs AOS** — Rosser's single biquad 80-110 Hz D-term chain against the PT1 pair; his own whoop preset keeps the PT1 pair, so treat it as an experiment and watch the motors.
+
+Meteor75 Pro: the raw gyro shows the 2nd and 3rd motor harmonics leaking with `rpm_filter_harmonics 1` (and the 3rd with 2) — set 3 harmonics before the `dyn_notch_max_hz 400` flight of section 3, then let the weights finding (2 kHz logs only) trim them.
+
+RC smoothing (global, not A/B-able): the default 30 is a racing setting; try `set rc_smoothing_auto_factor = 50` for outdoor freestyle and judge by feel — each step of smoothing costs a few ms of stick delay.

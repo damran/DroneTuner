@@ -41,9 +41,12 @@
 |---|---|
 | 🛸 **Fleet management** | Track every quad: BOM/component library, photos, flights, battery stats, per-drone notes. FC auto-detect matches a connected board to the right drone by UID, craft name, target, and board. |
 | 🔌 **Browser-native FC link** | Talks MSP v2 to your flight controller over WebSerial — no drivers, no desktop app, no cloud. The backend never touches a serial port. |
-| 📊 **Blackbox log lab** | In-browser log parsing, per-axis gyro traces, FFT noise spectra, spectrogram-based resonance classification (frame vs. motor harmonics), step response, and plain-language findings. Compare current vs. previous logs with automatic setting diffs. |
-| 🧙 **Tuning wizard** | Goal-based baseline templates plus analysis-driven proposals. Nothing is folded into your draft until you tick it, and every recommendation ships with a copyable Betaflight CLI snippet. |
-| 🔒 **Safe writes** | Every change goes through **snapshot → diff → explicit confirm → apply → EEPROM save**. Any snapshot is a one-click restore point. Writes are gated to Betaflight 4.4/4.5 — anything else is read-only. |
+| 📊 **Blackbox log lab** | A flash download becomes one entry per flight. Per-axis gyro traces, FFT noise spectra, spectrogram-based noise classification (frame resonance vs. motor harmonics vs. idle-speed motor noise), step response, filter group-delay estimate and plain-language findings. Compare any two flights with automatic setting diffs and a better/worse verdict. |
+| 🧙 **Tuning wizard** | Templates per class and goal (65mm/75mm 1S analog, 75mm HD, 2in HD, 2.5in 2S · precision/freestyle/racing/cinematic) with their sources explained, plus analysis-driven proposals. Nothing is folded into your draft until you tick it, and every recommendation ships with a copyable Betaflight CLI snippet. |
+| ⚖️ **A/B in one pack** | Write a *crisp* and a *smooth* version of your draft into two PID profiles, fly A, land and switch to B (stick command or OSD), fly again in the same pack, then compare the two sessions in the Log Lab. Only the D-term filter chain differs, so you feel the latency-vs-noise trade-off itself. |
+| 📚 **Vendor catalogue** | 68 factory configs and community presets (BetaFPV, GEPRC, Happymodel, AOS, Karate, UAV Tech, ELRS rc_link, rates) seeded with source URLs, filterable by size class and video system, usable as per-component baselines. |
+| 🎛 **Simple / Advanced** | A sidebar toggle hides parameter tables, per-stage delay maths and CLI details until you want them. Dark and light themes. |
+| 🔒 **Safe writes** | Every change goes through **snapshot → diff → explicit confirm → apply → EEPROM save**. Any snapshot is a one-click restore point. Writes are gated to Betaflight 4.4 / 4.5 / 2025.12 — anything else is read-only. |
 | 🤖 **Local AI copilot** | An Ollama-powered chatbot explains findings and proposes confirmable action cards. It can *propose* — it can never write to the FC by itself. |
 | 🏠 **Local-first** | One SQLite file, your uploaded photos and logs on disk, zero external services required. Works fully offline (AI copilot optional). |
 
@@ -146,7 +149,7 @@ All settings are environment variables (see `server/.env.example`). With Docker 
 1. Use **Chrome or Edge on desktop** (WebSerial is required).
 2. Plug the FC in over USB — **props off**, always.
 3. Click **Connect** in the app; the FC is identified and matched to a drone in your fleet automatically.
-4. Betaflight **4.4 / 4.5** (MSP API 1.45/1.46): full read/write with the confirm-gated flow. Other versions: read-only.
+4. Betaflight **4.4 / 4.5 / 2025.12** (MSP API 1.45/1.46/1.47): full read/write with the confirm-gated flow (on 2025.12 the app swaps D and D-min to match the renamed d_max semantics). Other versions: read-only.
 
 ## 🤖 AI copilot (Ollama)
 
@@ -189,6 +192,7 @@ No Ollama? Everything else works — the chatbot simply stays offline.
 | `pnpm build` | Build the client bundle |
 | `pnpm test` / `pnpm typecheck` / `pnpm lint` | Vitest suites / strict TS checks / ESLint across workspaces (CI runs all three) |
 | `pnpm smoke` | e2e API smoke script (server must be running) |
+| `pnpm -C server exec tsx src/scripts/import-logs.ts --name "Air65 R" --size 65mm --video analog --dir <folder of .BBL> --dumps <folder of CLI .txt>` | Import a folder of blackbox downloads (one entry per flight) and CLI dumps for a drone |
 
 ## 🧰 Tech stack
 

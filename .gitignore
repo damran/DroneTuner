@@ -8,3 +8,5 @@ server/data/
 coverage/
 *.tsbuildinfo
 ext_logs/
+.claude/
+.scratch/

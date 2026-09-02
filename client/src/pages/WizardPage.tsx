@@ -529,8 +529,9 @@ export default function WizardPage() {
                 )}
                 <p className="text-xs text-muted-foreground">
                   After writing: fly A, land and disarm, switch to profile B (Betaflight 4.5 cannot change PID profiles from a
-                  switch in flight — use the stick command or the OSD menu → Profiles), fly the same lines again in the same
-                  pack. Every arm starts a new blackbox session, so the Log Lab can compare A and B side by side.
+                  switch in flight — stick command with throttle down and yaw left, then roll left = profile 1, pitch up =
+                  profile 2, roll right = profile 3, or the OSD menu → Profiles), fly the same lines again in the same pack.
+                  Every arm starts a new blackbox session, so the Log Lab labels A and B and compares them side by side.
                 </p>
               </CardContent>
             </Card>

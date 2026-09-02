@@ -1,0 +1,163 @@
+# 
+
+# diff all
+
+# version
+# Betaflight / STM32F405 (S405) 4.5.0 Dec 25 2024 / 08:01:31 (c155f5830) MSP API: 1.46
+# config rev: 16ac022
+
+# start the command batch
+batch start
+
+# reset configuration to default settings
+defaults nosave
+
+board_name BETAFPVF405
+manufacturer_id BEFH
+mcu_id 004000163134501120343842
+signature 
+
+# name: Pavo Pico II
+
+# feature
+feature RANGEFINDER
+feature TELEMETRY
+feature LED_STRIP
+feature OSD
+feature TRANSPONDER
+
+# serial
+serial 2 64 115200 57600 0 115200
+serial 3 131073 115200 57600 0 115200
+
+# beacon
+beacon RX_LOST
+beacon RX_SET
+
+# led
+led 0 0,0::CO:10
+led 1 1,0::CO:10
+
+# aux
+aux 0 0 0 1700 2100 0 0
+aux 1 1 1 900 1300 0 0
+aux 2 2 1 1300 1700 0 0
+aux 3 13 2 1700 2100 0 0
+aux 4 35 3 1650 2100 0 0
+
+# master
+set gyro_lpf1_static_hz = 0
+set dyn_notch_count = 0
+set dyn_notch_q = 500
+set gyro_lpf1_dyn_min_hz = 0
+set acc_calibration = -16,24,-16,1
+set dshot_idle_value = 1150
+set dshot_bidir = ON
+set motor_pwm_protocol = DSHOT300
+set motor_poles = 12
+set motor_output_reordering = 2,3,0,1,4,5,6,7
+set align_board_roll = 180
+set vbat_max_cell_voltage = 440
+set vbat_min_cell_voltage = 340
+set ibata_scale = 510
+set ibata_offset = -300
+set small_angle = 180
+set pid_process_denom = 2
+set osd_rssi_dbm_alarm = -98
+set osd_vbat_pos = 2530
+set osd_rssi_pos = 192
+set osd_link_quality_pos = 2466
+set osd_rssi_dbm_pos = 2434
+set osd_rsnr_pos = 160
+set osd_tim_2_pos = 3598
+set osd_flymode_pos = 3535
+set osd_throttle_pos = 3503
+set osd_crosshairs_pos = 2361
+set osd_current_pos = 2561
+set osd_craft_name_pos = 2550
+set osd_warnings_pos = 14805
+set osd_esc_tmp_pos = 129
+set osd_core_temp_pos = 225
+set debug_mode = GYRO_SCALED
+set craft_name = Pavo Pico II
+
+profile 0
+
+# profile 0
+set profile_name = DJI O4
+set p_pitch = 67
+set d_pitch = 68
+set f_pitch = 80
+set p_roll = 56
+set i_roll = 70
+set d_roll = 50
+set f_roll = 67
+set p_yaw = 56
+set i_yaw = 70
+set f_yaw = 67
+set d_min_roll = 50
+set d_min_pitch = 68
+set feedforward_averaging = 2_POINT
+set feedforward_smooth_factor = 60
+set feedforward_jitter_factor = 10
+set simplified_master_multiplier = 125
+set simplified_i_gain = 70
+set simplified_d_gain = 135
+set simplified_dmax_gain = 0
+set simplified_feedforward_gain = 45
+set simplified_pitch_d_gain = 120
+set simplified_pitch_pi_gain = 115
+set tpa_breakpoint = 1300
+
+profile 1
+
+# profile 1
+set profile_name = O4 Pro
+set p_pitch = 79
+set i_pitch = 100
+set d_pitch = 77
+set f_pitch = 80
+set p_roll = 63
+set i_roll = 79
+set d_roll = 50
+set f_roll = 64
+set p_yaw = 63
+set i_yaw = 79
+set f_yaw = 64
+set d_min_roll = 50
+set d_min_pitch = 77
+set feedforward_averaging = 2_POINT
+set feedforward_smooth_factor = 60
+set feedforward_jitter_factor = 10
+set simplified_master_multiplier = 135
+set simplified_i_gain = 70
+set simplified_d_gain = 125
+set simplified_pi_gain = 105
+set simplified_dmax_gain = 0
+set simplified_feedforward_gain = 40
+set simplified_pitch_d_gain = 135
+set simplified_pitch_pi_gain = 120
+set tpa_rate = 70
+set tpa_breakpoint = 1340
+
+profile 2
+
+profile 3
+
+# restore original profile selection
+profile 0
+
+rateprofile 0
+
+rateprofile 1
+
+rateprofile 2
+
+rateprofile 3
+
+# restore original rateprofile selection
+rateprofile 0
+
+# save configuration
+save
+# 

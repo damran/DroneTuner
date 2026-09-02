@@ -21,6 +21,9 @@ export interface CliDumpMeta {
   /** FC target from the dump header comment, e.g. "BETAFPVF405". */
   targetName?: string;
   fcVersion?: string;
+  /** PID profile the dump's settings were taken from (the one selected at the end of the dump). */
+  selectedProfile?: number;
+  selectedRateProfile?: number;
 }
 
 export interface CliDumpParseResult {
@@ -213,16 +216,12 @@ export function parseCliDump(input: string): CliDumpParseResult {
   const targetMatch = /^#?\s*target_name\s+(\S+)\s*$/gim.exec(text);
   if (targetMatch) meta.targetName = targetMatch[1];
 
-  const setRe = /^\s*set\s+([a-z0-9_]+)\s*=\s*(.+?)\s*$/gim;
-  let m: RegExpExecArray | null;
-  while ((m = setRe.exec(text)) !== null) {
-    const key = m[1]!.toLowerCase();
-    const raw = m[2]!.trim();
+  const apply = (key: string, raw: string): void => {
 
     if (key === "name") {
       meta.craftName = raw;
       recognized.push(key);
-      continue;
+      return;
     }
 
     // rpm_filter_weights is a CLI array ("100,100,100") — split into the
@@ -240,7 +239,7 @@ export function parseCliDump(input: string): CliDumpParseResult {
       } else {
         ignored.push(key);
       }
-      continue;
+      return;
     }
 
     const pid = PID_KEYS[key];
@@ -248,13 +247,13 @@ export function parseCliDump(input: string): CliDumpParseResult {
       const v = parseInt(raw);
       if (v === null) {
         ignored.push(key);
-        continue;
+        return;
       }
       const [axis, term] = pid;
       settings.pids ??= {};
       settings.pids[axis] = { ...settings.pids[axis], [term]: v };
       recognized.push(key);
-      continue;
+      return;
     }
 
     const filter = FILTER_KEYS[key];
@@ -262,11 +261,11 @@ export function parseCliDump(input: string): CliDumpParseResult {
       const v = filter.enum ? enumValue(filter.enum, raw) : parseInt(raw);
       if (v === undefined || v === null) {
         ignored.push(key);
-        continue;
+        return;
       }
       settings.filters = { ...settings.filters, [filter.field]: v };
       recognized.push(key);
-      continue;
+      return;
     }
 
     const rate = RATE_KEYS[key];
@@ -274,11 +273,11 @@ export function parseCliDump(input: string): CliDumpParseResult {
       const v = rate.enum ? enumValue(rate.enum, raw) : parseScaled(raw);
       if (v === undefined || v === null) {
         ignored.push(key);
-        continue;
+        return;
       }
       settings.rates = { ...settings.rates, [rate.field]: v };
       recognized.push(key);
-      continue;
+      return;
     }
 
     const adv = ADVANCED_KEYS[key];
@@ -286,15 +285,59 @@ export function parseCliDump(input: string): CliDumpParseResult {
       const v = adv.enum ? enumValue(adv.enum, raw) : parseInt(raw);
       if (v === undefined || v === null) {
         ignored.push(key);
-        continue;
+        return;
       }
       settings.advanced = { ...settings.advanced, [adv.field]: v };
       recognized.push(key);
-      continue;
+      return;
     }
 
     ignored.push(key);
+  };
+
+  // A full dump lists every PID profile and rate profile back to back and
+  // ends each block with the selection that was active ("profile 1"). Only
+  // the master section plus the SELECTED profile/rateprofile describe the
+  // tune that actually flies — letting the last section win would return
+  // profile 3's defaults for every vendor dump.
+  const master: [string, string][] = [];
+  const byProfile = new Map<number, [string, string][]>();
+  const byRate = new Map<number, [string, string][]>();
+  let section: { kind: "master" } | { kind: "profile" | "rate"; n: number } = { kind: "master" };
+  let selectedProfile: number | null = null;
+  let selectedRate: number | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim();
+    const pm = /^profile\s+(\d)$/i.exec(t);
+    if (pm) {
+      section = { kind: "profile", n: Number(pm[1]) };
+      selectedProfile = section.n;
+      continue;
+    }
+    const rm = /^rateprofile\s+(\d)$/i.exec(t);
+    if (rm) {
+      section = { kind: "rate", n: Number(rm[1]) };
+      selectedRate = section.n;
+      continue;
+    }
+    const sm = /^set\s+([a-z0-9_]+)\s*=\s*(.+?)\s*$/i.exec(t);
+    if (!sm) continue;
+    const entry: [string, string] = [sm[1]!.toLowerCase(), sm[2]!.trim()];
+    if (section.kind === "master") master.push(entry);
+    else if (section.kind === "profile") (byProfile.get(section.n) ?? byProfile.set(section.n, []).get(section.n)!).push(entry);
+    else (byRate.get(section.n) ?? byRate.set(section.n, []).get(section.n)!).push(entry);
   }
+  // A selected profile with no `set` lines is a profile left at firmware
+  // defaults (a `diff` omits it) — never substitute another profile's values
+  // for it. `selected` is only ever null when no marker was seen, and then
+  // the maps are empty too.
+  const pick = (map: Map<number, [string, string][]>, selected: number | null): [string, string][] =>
+    selected === null ? [] : (map.get(selected) ?? []);
+  for (const [k, v] of master) apply(k, v);
+  for (const [k, v] of pick(byProfile, selectedProfile)) apply(k, v);
+  for (const [k, v] of pick(byRate, selectedRate)) apply(k, v);
+  if (selectedProfile !== null) meta.selectedProfile = selectedProfile;
+  if (selectedRate !== null) meta.selectedRateProfile = selectedRate;
 
   return { settings, meta, recognized, ignored };
 }

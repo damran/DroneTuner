@@ -5,7 +5,9 @@ import path from "node:path";
 import { buildApp } from "../src/app";
 import type { ServerConfig } from "../src/config";
 import { createDb } from "../src/db";
-import { profiles } from "../src/db/schema";
+import { profiles, vendorPresets } from "../src/db/schema";
+import { runSeed } from "../src/seed/seed";
+import { buildLog } from "../../shared/test/helpers/synthetic-log";
 
 let app: ReturnType<typeof buildApp>;
 let db: ReturnType<typeof createDb>;
@@ -168,7 +170,7 @@ describe("api", () => {
     const [tpl] = await db
       .insert(profiles)
       .values({
-        name: "65mm Racing", // exact seed template name
+        name: "65mm 1S analog · Racing", // exact seed template name
         goal: "racing",
         sizeClass: "65mm",
         droneId: null,
@@ -188,7 +190,7 @@ describe("api", () => {
     const [copy] = await db
       .insert(profiles)
       .values({
-        name: "65mm Racing (copy)",
+        name: "65mm 1S analog · Racing (copy)",
         goal: "racing",
         sizeClass: "65mm",
         droneId: null,
@@ -203,5 +205,82 @@ describe("api", () => {
       payload: { settings: { pids: { roll: { p: 99 } } } },
     });
     expect(allowed.statusCode).toBe(200);
+  });
+
+  it("uploading a multi-session blackbox file creates one log per flight", async () => {
+    const drone = await app.inject({ method: "POST", url: "/api/drones", payload: { name: "Multi Whoop", sizeClass: "65mm" } });
+    const droneId = drone.json().id;
+
+    // Two sessions back to back, like a flash download with two arms. The
+    // synthetic frames span 1 ms, so both are "blips" and the longest is kept.
+    const one = buildLog();
+    const two = buildLog({ firmware: "Betaflight 4.5.1 (second)" });
+    const data = Buffer.concat([Buffer.from(one), Buffer.from(two)]);
+    const boundary = "----dronetuner-test";
+    const body = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="droneId"\r\n\r\n${droneId}\r\n`),
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="BTFL_BLACKBOX_LOG_TEST_20260518_125703_X.BBL"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+      ),
+      data,
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ]);
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/logs",
+      headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+      payload: body,
+    });
+    expect(res.statusCode).toBe(200);
+    const result = res.json();
+    expect(result.sessionCount).toBe(2);
+    expect(result.logs.length).toBe(1); // both blips -> longest kept
+    expect(result.skippedSessions).toBe(1);
+    const log = result.logs[0];
+    expect(log.sessionCount).toBe(2);
+    expect(log.originalName).toBe("BTFL_BLACKBOX_LOG_TEST_20260518_125703_X.BBL");
+    // Recorded time comes from the filename because the header has no clock.
+    expect(new Date(log.recordedAt).getFullYear()).toBe(2026);
+
+    const list = await app.inject({ method: "GET", url: `/api/logs?droneId=${droneId}` });
+    expect(list.json().length).toBe(1);
+    expect(list.json()[0].sessionIndex).toBe(log.sessionIndex);
+
+    // Deleting the only row removes the shared file too.
+    const del = await app.inject({ method: "DELETE", url: `/api/logs/${log.id}` });
+    expect(del.statusCode).toBe(204);
+  });
+
+  it("seeds the vendor catalogue idempotently with parsed settings and source URLs", async () => {
+    const first = await runSeed(db);
+    expect(first.vendorInserted).toBeGreaterThan(50);
+    expect(first.vendorSkipped).toEqual([]);
+    const second = await runSeed(db);
+    expect(second.vendorInserted, JSON.stringify({ first, second })).toBe(0);
+    expect(second.vendorUpdated, JSON.stringify({ first, second })).toBe(first.vendorInserted);
+
+    const rows = await db.select().from(vendorPresets);
+    expect(rows.every((r) => r.source === "seed" && r.sourceUrl && r.cliDump)).toBe(true);
+
+    // A resolved community preset: AOS 65mm filters (Chris Rosser).
+    const aos = rows.find((r) => r.name.startsWith("AOS 65mm filters"));
+    expect(aos?.kind).toBe("preset");
+    const aosSettings = aos!.settingsJson as { filters?: Record<string, number> };
+    expect(aosSettings.filters?.dynNotchCount).toBe(1);
+    expect(aosSettings.filters?.dynNotchMinHz).toBe(150);
+    expect(aosSettings.filters?.gyroLowpass2Hz).toBe(1000);
+
+    // A factory dump: the Air65 R keeps its class metadata and PIDs.
+    const air65 = rows.find((r) => r.name.startsWith("BetaFPV Air65 Racing"));
+    expect(air65?.sizeClass).toBe("65mm");
+    expect(air65?.videoSystem).toBe("analog");
+    const air65Settings = air65!.settingsJson as { pids?: { pitch?: { p?: number } } };
+    expect(air65Settings.pids?.pitch?.p).toBe(71);
+
+    const list = await app.inject({ method: "GET", url: "/api/vendor-presets?sizeClass=65mm&kind=factory" });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().length).toBeGreaterThan(5);
+    expect(list.json().every((p: { sizeClass: string }) => p.sizeClass === "65mm")).toBe(true);
+    expect(list.json()[0].cliDump).toBe(""); // list responses omit the raw text
   });
 });

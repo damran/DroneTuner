@@ -1,0 +1,176 @@
+# 
+
+# diff all
+
+# version
+# Betaflight / STM32F405 (S405) 4.5.0 Dec 25 2024 / 08:01:31 (c155f5830) MSP API: 1.46
+# config rev: 16ac022
+
+# start the command batch
+batch start
+
+# reset configuration to default settings
+defaults nosave
+
+board_name BETAFPVF405
+manufacturer_id BEFH
+mcu_id 002000253134501320343842
+signature 
+
+# name: Pavo Femto
+
+# feature
+feature TELEMETRY
+feature LED_STRIP
+feature OSD
+
+# serial
+serial 2 64 115200 57600 0 115200
+serial 3 131073 115200 57600 0 115200
+
+# beeper
+beeper -GYRO_CALIBRATED
+beeper -RX_LOST
+beeper -RX_LOST_LANDING
+beeper -DISARMING
+beeper -ARMING
+beeper -ARMING_GPS_FIX
+beeper -BAT_CRIT_LOW
+beeper -BAT_LOW
+beeper -GPS_STATUS
+beeper -RX_SET
+beeper -ACC_CALIBRATION
+beeper -ACC_CALIBRATION_FAIL
+beeper -READY_BEEP
+beeper -DISARM_REPEAT
+beeper -ARMED
+beeper -SYSTEM_INIT
+beeper -ON_USB
+beeper -BLACKBOX_ERASE
+beeper -CRASH_FLIP
+beeper -CAM_CONNECTION_OPEN
+beeper -CAM_CONNECTION_CLOSE
+beeper -RC_SMOOTHING_INIT_FAIL
+
+# beacon
+beacon RX_LOST
+beacon RX_SET
+
+# led
+led 0 0,0::CO:10
+led 1 1,0::CO:10
+
+# aux
+aux 0 0 0 1700 2100 0 0
+aux 1 1 1 900 1300 0 0
+aux 2 2 1 1300 1700 0 0
+aux 3 13 3 1700 2100 0 0
+aux 4 35 2 1700 2100 0 0
+
+# master
+set gyro_lpf1_static_hz = 0
+set gyro_lpf2_static_hz = 550
+set dyn_notch_count = 0
+set dyn_notch_q = 500
+set gyro_lpf1_dyn_min_hz = 0
+set acc_calibration = -7,18,-15,1
+set baro_hardware = AUTO
+set dshot_idle_value = 1300
+set dshot_bidir = ON
+set motor_pwm_protocol = DSHOT300
+set motor_poles = 12
+set motor_output_reordering = 2,3,0,1,4,5,6,7
+set align_board_roll = 180
+set vbat_min_cell_voltage = 335
+set vbat_warning_cell_voltage = 345
+set ibata_scale = 510
+set ibata_offset = -300
+set small_angle = 180
+set pid_process_denom = 2
+set simplified_gyro_filter_multiplier = 110
+set osd_rssi_dbm_alarm = -100
+set osd_vbat_pos = 2561
+set osd_rssi_pos = 192
+set osd_link_quality_pos = 2496
+set osd_rssi_dbm_pos = 2464
+set osd_rsnr_pos = 160
+set osd_tim_2_pos = 3629
+set osd_flymode_pos = 3598
+set osd_throttle_pos = 3566
+set osd_crosshairs_pos = 2361
+set osd_current_pos = 2592
+set osd_craft_name_pos = 2582
+set osd_warnings_pos = 14837
+set osd_esc_tmp_pos = 129
+set osd_core_temp_pos = 225
+set debug_mode = GYRO_SCALED
+set craft_name = Pavo Femto
+
+profile 0
+
+# profile 0
+set dterm_lpf1_dyn_min_hz = 78
+set dterm_lpf1_dyn_max_hz = 157
+set dterm_lpf1_static_hz = 78
+set dterm_lpf2_static_hz = 157
+set p_pitch = 59
+set i_pitch = 96
+set d_pitch = 62
+set f_pitch = 57
+set p_roll = 51
+set i_roll = 83
+set d_roll = 44
+set f_roll = 50
+set p_yaw = 51
+set i_yaw = 83
+set f_yaw = 50
+set d_min_roll = 44
+set d_min_pitch = 62
+set feedforward_averaging = 2_POINT
+set feedforward_smooth_factor = 60
+set feedforward_jitter_factor = 10
+set simplified_master_multiplier = 105
+set simplified_i_gain = 90
+set simplified_d_gain = 140
+set simplified_pi_gain = 110
+set simplified_dmax_gain = 0
+set simplified_feedforward_gain = 40
+set simplified_pitch_d_gain = 125
+set simplified_pitch_pi_gain = 110
+set simplified_dterm_filter_multiplier = 105
+set tpa_breakpoint = 1320
+
+profile 1
+
+profile 2
+
+profile 3
+
+# restore original profile selection
+profile 0
+
+rateprofile 0
+
+# rateprofile 0
+set roll_rc_rate = 5
+set pitch_rc_rate = 5
+set yaw_rc_rate = 5
+set roll_expo = 45
+set pitch_expo = 45
+set yaw_expo = 45
+set roll_srate = 72
+set pitch_srate = 72
+set yaw_srate = 54
+
+rateprofile 1
+
+rateprofile 2
+
+rateprofile 3
+
+# restore original rateprofile selection
+rateprofile 0
+
+# save configuration
+save
+# 

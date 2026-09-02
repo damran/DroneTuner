@@ -54,6 +54,14 @@ function toPreset(row: typeof vendorPresets.$inferSelect): VendorPreset {
     cliDump: row.cliDump,
     sourceUrl: row.sourceUrl,
     createdAt: row.createdAt,
+    vendor: row.vendor,
+    sizeClass: row.sizeClass,
+    videoSystem: row.videoSystem,
+    cells: row.cells,
+    bfVersion: row.bfVersion,
+    kind: (row.kind === "preset" ? "preset" : "factory") as VendorPreset["kind"],
+    variant: row.variant,
+    notes: row.notes,
   };
 }
 
@@ -61,11 +69,31 @@ export default async function vendorPresetsRoutes(app: FastifyInstance, opts: { 
   const { db } = opts.ctx;
 
   app.get("/api/vendor-presets", async (req) => {
-    const { componentId, boardTarget } = req.query as { componentId?: string; boardTarget?: string };
+    const { componentId, boardTarget, sizeClass, kind, videoSystem, full } = req.query as {
+      componentId?: string;
+      boardTarget?: string;
+      sizeClass?: string;
+      kind?: string;
+      videoSystem?: string;
+      full?: string;
+    };
     let rows = await db.select().from(vendorPresets).orderBy(desc(vendorPresets.createdAt));
     if (componentId) rows = rows.filter((r) => r.componentId === Number(componentId));
     if (boardTarget) rows = rows.filter((r) => r.boardTarget?.toLowerCase() === boardTarget.toLowerCase());
-    return rows.map(toPreset);
+    // "any" catalogue entries (generic presets) match every class/video filter.
+    if (sizeClass) rows = rows.filter((r) => !r.sizeClass || r.sizeClass === "any" || r.sizeClass === sizeClass);
+    if (videoSystem) rows = rows.filter((r) => !r.videoSystem || r.videoSystem === "any" || r.videoSystem === videoSystem);
+    if (kind) rows = rows.filter((r) => r.kind === kind);
+    const presets = rows.map(toPreset);
+    // The raw dumps are large (up to 40 KB each); list responses omit them unless asked.
+    return full === "1" ? presets : presets.map((p) => ({ ...p, cliDump: p.cliDump ? "" : null }));
+  });
+
+  app.get("/api/vendor-presets/:id", async (req, reply) => {
+    const id = Number((req.params as { id: string }).id);
+    const row = await db.select().from(vendorPresets).where(eq(vendorPresets.id, id)).get();
+    if (!row) return reply.code(404).send({ error: "Preset not found" });
+    return toPreset(row);
   });
 
   app.post("/api/vendor-presets", async (req) => {

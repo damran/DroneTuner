@@ -113,4 +113,64 @@ describe("parseCliDump", () => {
   it("extractText strips tags and entities", () => {
     expect(extractText("<b>a</b> &amp; b")).toBe("a & b");
   });
+
+  it("uses the selected PID profile and rate profile of a multi-profile dump", () => {
+    const dump = [
+      "# Betaflight / STM32G47X (SG47) 4.5.0 May 16 2024 / 01:17:04 (c155f5830) MSP API: 1.46",
+      "set dyn_notch_count = 2",
+      "profile 0",
+      "set p_pitch = 71",
+      "set d_pitch = 60",
+      "profile 1",
+      "set p_pitch = 67",
+      "set d_pitch = 51",
+      "profile 2",
+      "set p_pitch = 47",
+      "profile 3",
+      "set p_pitch = 47",
+      "# restore original profile selection",
+      "profile 1",
+      "rateprofile 0",
+      "set roll_srate = 90",
+      "rateprofile 1",
+      "set roll_srate = 67",
+      "rateprofile 0",
+      "save",
+    ].join("\n");
+    const r = parseCliDump(dump);
+    expect(r.meta.selectedProfile).toBe(1);
+    expect(r.meta.selectedRateProfile).toBe(0);
+    expect(r.settings.pids?.pitch?.p).toBe(67);
+    expect(r.settings.pids?.pitch?.d).toBe(51);
+    expect(r.settings.rates?.rollRate).toBe(90);
+    expect(r.settings.filters?.dynNotchCount).toBe(2);
+
+    // A diff without the trailing selection falls back to the first profile listed.
+    const noRestore = ["profile 0", "set p_pitch = 71", "profile 1", "set p_pitch = 67"].join("\n");
+    expect(parseCliDump(noRestore).settings.pids?.pitch?.p).toBe(67); // last "profile N" line selects 1
+    const single = ["profile 2", "set p_pitch = 47"].join("\n");
+    expect(parseCliDump(single).meta.selectedProfile).toBe(2);
+  });
+
+  it("never substitutes another profile when the selected one has no overrides (all-default profile)", () => {
+    // A `diff` omits the section body of a profile left at defaults. The FC
+    // flies profile 1's defaults here, so profile 0's PIDs must not leak in.
+    const dump = [
+      "profile 0",
+      "set p_pitch = 71",
+      "set d_pitch = 60",
+      "profile 1",
+      "# restore original profile selection",
+      "profile 1",
+      "rateprofile 0",
+      "set roll_srate = 90",
+      "rateprofile 2",
+      "save",
+    ].join("\n");
+    const r = parseCliDump(dump);
+    expect(r.meta.selectedProfile).toBe(1);
+    expect(r.meta.selectedRateProfile).toBe(2);
+    expect(r.settings.pids?.pitch).toBeUndefined();
+    expect(r.settings.rates?.rollRate).toBeUndefined();
+  });
 });

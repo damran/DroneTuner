@@ -7,18 +7,31 @@ import { settingsToCli } from "./cli";
 
 /**
  * Deterministic tuning rules for Betaflight 4.4/4.5, following Chris Rosser's
- * filter/PID masterclass methodology and the official BF docs:
+ * Betaflight 4.5 tuning masterclass (filters / PIDs / rates, 2024), Brian
+ * White's PIDtoolbox step-response method and the official BF docs. See
+ * docs/tuning-research-2026-09.md ("Rosser masterclass reconciliation") for
+ * the claim-by-claim table.
  *
- * - Motor noise (throttle-swept ridges) → RPM filter (min/fade/Q/weights).
- * - Frame resonances (fixed-frequency stripes) → dynamic notch; the notch
- *   never hunts below 100 Hz, is disabled entirely on quiet frames with RPM
- *   filtering, and its count matches the number of resonances.
- * - Gyro LPF2 is treated as the anti-aliasing filter it is (1000 Hz when gyro
- *   rate > PID rate, disabled when they're equal).
- * - D-term LPF dyn min is tuned against low-throttle noise, dyn max against
- *   high-throttle noise (Rosser's AOS two-stage method).
- * - PD balance is D-first (D is the shock absorber); FF is tuned from
- *   start-of-move lag / end-of-move overshoot; I from steady-state error.
+ * - The RAW gyro (gyroUnfilt, `metrics.spectralRaw`) says which noise exists;
+ *   the FILTERED gyro (`metrics.spectral`) says what leaks through. Rosser's
+ *   filter flight reads the raw frequency-vs-throttle view.
+ * - Motor noise (harmonics of the eRPM frequency) → RPM filter: fade in where
+ *   the noise starts, push Q toward 1000 while nothing leaks, dim the
+ *   harmonics the raw spectrum does not show (tri-blade: 100,0,80).
+ * - Frame resonances (fixed-frequency stripes) → dynamic notch: one notch per
+ *   stripe, minimum a little below the lowest stripe and never below 100 Hz
+ *   (ideally ≥150), Q raised only while the stripe stays fully notched,
+ *   count 0 when the raw gyro shows no stripe at all.
+ * - Gyro LPF1 stays off; LPF2 is the anti-aliasing filter (1000 Hz when the
+ *   gyro rate exceeds the PID rate; optional off when they are equal).
+ * - D-term LPF: more filtering where the D-term noise is (dyn min at low
+ *   throttle, dyn max at high throttle); less filtering is the crisp A/B.
+ * - PIDs: fix the P:D ratio first (under-damped → lower P&I, Rosser's
+ *   tracking slider; raise D only when D is abnormally low), I from a tail
+ *   that droops (steady-state error) and from slow drawn-out overshoot,
+ *   FF from start-of-move lag (boost when the lag is start-only) and
+ *   end-of-move overshoot. TPA breakpoint just below the throttle where the
+ *   high-throttle noise starts, rate up (more attenuation).
  *
  * Rules emit deltas relative to `base` (or BF 4.5 factory defaults when
  * absent) and every recommendation carries absolute CLI lines so the user can
@@ -32,8 +45,9 @@ export interface RuleOutput {
 
 /** BF 4.5 factory PID defaults (used only to resolve CLI lines when no base). */
 const BF45_PID_DEFAULTS: Record<Axis, PidTerms> = {
-  roll: { p: 45, i: 80, d: 30 },
-  pitch: { p: 47, i: 84, d: 32 },
+  // pid.h on 4.5-maintenance: PID_ROLL_DEFAULT {45,80,40,120}, PID_PITCH_DEFAULT {47,84,46,125}.
+  roll: { p: 45, i: 80, d: 40 },
+  pitch: { p: 47, i: 84, d: 46 },
   yaw: { p: 45, i: 80, d: 0 },
 };
 
@@ -46,7 +60,7 @@ const BF45_ADVANCED_DEFAULTS: Record<string, number> = {
   feedforwardMaxRateLimit: 90,
   itermRelaxCutoff: 15,
   dMinRoll: 30,
-  dMinPitch: 32,
+  dMinPitch: 34, // D_MIN_DEFAULT {30, 34, 0}
   dMaxGain: 37,
   dMaxAdvance: 20,
   antiGravityGain: 80,
@@ -152,13 +166,26 @@ export function applyChanges(base: ProfileSettings, changes: ProfileSettings): P
 }
 
 const AXIS_LABEL: Record<Axis, string> = { roll: "Roll", pitch: "Pitch", yaw: "Yaw" };
+const FF_KEY = { roll: "feedforwardRoll", pitch: "feedforwardPitch", yaw: "feedforwardYaw" } as const;
 
 /** D-term RMS above this (raw PID-sum units) is treated as noisy. */
 const DTERM_NOISY = 120;
 const DTERM_VERY_NOISY = 250;
+/** D-term RMS below this in every throttle band = filtering headroom (the
+ * "raise the D-term multiplier until the motors get rough" direction). */
+const DTERM_QUIET = 60;
 /** Minimum dynamic-notch hunt frequency — below ~100 Hz the notch adds nasty
- * delay in the PID-relevant band (Rosser / BF docs). */
+ * delay in the PID-relevant band (Rosser: "definitely more than 100 Hz,
+ * ideally more than 150"). */
 const DYN_NOTCH_MIN_FLOOR_HZ = 100;
+/** Rosser / Brian White: neither notch is worth pushing past Q 1000. */
+const NOTCH_Q_MAX = 1000;
+/**
+ * RC smoothing auto factor by goal. Betaflight's default 30 is a racing
+ * setting (Rosser); freestyle 50–60, cinematic 90–100 (Rosser), racing 20–25
+ * (Oscar Liang / the 500 Hz race preset). Indoor precision sits between.
+ */
+const RC_SMOOTHING_TARGET: Partial<Record<string, number>> = { racing: 25, freestyle: 50, cinematic: 90 };
 /** Below this much flight the spectra/step statistics are noise, not evidence. */
 const MIN_LOG_S = 10;
 
@@ -253,7 +280,7 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
         id: "notch-floor",
         severity: "warning",
         title: `Dynamic notch floor at ${flownNotchMin} Hz is inside the control band`,
-        detail: `Betaflight's own presets never go below 80 Hz and every whoop/micro tune uses 100-150 Hz. A notch that hunts into the 60-90 Hz band removes real control signal and can start a low-frequency oscillation (this fleet crashed at 60 Hz / Q 300). Fix frame resonances below 100 Hz mechanically (props, CG, motor screws) and with D-term filtering instead.`,
+        detail: `Rosser: set the notch minimum a little below the lowest frame stripe, "definitely more than 100 Hz, ideally more than 150"; Betaflight's own presets never go below 80 Hz and every whoop/micro tune uses 100-150 Hz. A notch that hunts into the 60-90 Hz band removes real control signal and can start a low-frequency oscillation (this fleet crashed at 60 Hz / Q 300). Stripes below 100 Hz are usually not the frame (a loose antenna, camera or canopy) — fix them mechanically and with D-term filtering instead.`,
       },
       baseMin < DYN_NOTCH_MIN_FLOOR_HZ ? { filters: { dynNotchMinHz: DYN_NOTCH_MIN_FLOOR_HZ - baseMin } } : undefined,
       baseMin < DYN_NOTCH_MIN_FLOOR_HZ ? `Raise dyn_notch_min_hz to ${DYN_NOTCH_MIN_FLOOR_HZ} Hz.` : undefined,
@@ -264,22 +291,37 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
   // Idle-speed motor noise: dynamic idle parks the motors at a fixed RPM, so
   // its fundamental shows up as a "fixed" peak. It is the RPM filter's job
   // (or simply accepted) — never the dynamic notch's.
-  const idlePeaks = (metrics.spectral ?? [])
+  const idlePeaks = [...(metrics.spectralRaw ?? []), ...(metrics.spectral ?? [])]
     .flatMap((sp) => sp.peaks.map((pk) => ({ axis: sp.axis, ...pk })))
     .filter((pk) => pk.kind === "motorIdle" && pk.ratioToFloor > 4);
   if (idlePeaks.length > 0) {
     const strongest = idlePeaks.reduce((a, b) => (a.ratioToFloor > b.ratioToFloor ? a : b));
     const rpmMin = baseFilters.rpmFilterMinHz ?? 100;
-    findings.push({
+    const baseIdle = effectiveBase.advanced?.idleMinRpm ?? 0;
+    // dyn_idle_min_rpm is mechanical rpm / 100: the idle line reaches the RPM
+    // filter floor at rpm_filter_min_hz × 60 rpm.
+    const idleForRpmFloor = Math.ceil((rpmMin * 60) / 100);
+    const belowFloor = strongest.freqHz < rpmMin;
+    const finding: Finding = {
       id: "motor-idle",
       severity: "info",
       title: `Idle-speed motor noise at ${Math.round(strongest.freqHz)} Hz`,
       detail: `A fixed peak at the motors' idle speed (${strongest.ratioToFloor.toFixed(1)}× the floor on ${AXIS_LABEL[strongest.axis]}). ${
-        strongest.freqHz < rpmMin
-          ? `It sits below rpm_filter_min_hz (${rpmMin} Hz) where the RPM notches are faded out — either lower rpm_filter_min_hz toward it (more delay at low throttle) or accept it; it disappears as soon as the throttle rises.`
+        belowFloor
+          ? `It sits below rpm_filter_min_hz (${rpmMin} Hz) where the RPM notches are faded out, so it is never filtered. Options: raise dynamic idle so the idle line reaches the RPM floor (dyn_idle_min_rpm ${idleForRpmFloor} = ${idleForRpmFloor * 100} rpm — Rosser's whoop presets run 6600-10000 rpm and he calls dynamic idle "critical for propwash on small quads"; the cost is less descent authority), lower rpm_filter_min_hz toward it (more delay at low throttle), or accept it: it disappears as soon as the throttle rises.`
           : "The RPM filter should cover it — check motor_poles and that bidirectional DShot reports RPM on all motors."
       } Do not widen the dynamic notch to chase it.`,
-    });
+    };
+    if (belowFloor && baseIdle > 0 && baseIdle < idleForRpmFloor) {
+      add(
+        finding,
+        { advanced: { idleMinRpm: idleForRpmFloor - baseIdle } },
+        `Raise dynamic idle to ${idleForRpmFloor * 100} rpm so the idle line lands inside the RPM filter's range (Rosser: higher idle = better propwash on small quads). Fly it as the "Dynamic idle" A/B pair before committing — it changes how the quad drops.`,
+        0.4,
+      );
+    } else {
+      findings.push(finding);
+    }
   }
 
   // motor_poles sanity check: every RPM notch is placed from eRPM and the
@@ -353,10 +395,15 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
   //    (throttle-swept). Only fixed-frequency peaks may steer the dynamic
   //    notch — motor noise belongs to the RPM filter.
   // ------------------------------------------------------------------
-  const resonances = collectResonances(metrics);
-  const motorPeaks = collectMotorPeaks(metrics);
+  const resonances = collectResonances(metrics.spectral, metrics);
+  const rawAvailable = !!metrics.spectralRaw;
+  const resonancesRaw = rawAvailable ? collectResonances(metrics.spectralRaw) : [];
+  const motorPeaks = collectMotorPeaks(metrics.spectral);
+  const motorPeaksRaw = rawAvailable ? collectMotorPeaks(metrics.spectralRaw) : [];
 
   if (resonances.length > 0) {
+    // A stripe in the FILTERED gyro: the notch is not covering it (wrong
+    // range, too few notches, or a notch so tight the noise escapes beside it).
     const strongest = resonances.reduce((a, b) => (a.ratio > b.ratio ? a : b));
     const severity: Finding["severity"] = strongest.ratio > 8 ? "critical" : "warning";
     const baseCount = baseFilters.dynNotchCount ?? 3;
@@ -370,7 +417,7 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
       title: `Frame resonance at ${resonances.map((r) => `${Math.round(r.freqHz)} Hz`).join(", ")}`,
       detail: `Fixed-frequency noise ${strongest.ratio.toFixed(1)}× above the noise floor on ${strongest.axes
         .map((a) => AXIS_LABEL[a])
-        .join("/")}. Frame resonances are the dynamic notch's job — not the RPM filter's.`,
+        .join("/")} — and it is still there in the filtered gyro, so the dynamic notch is not removing it. Frame resonances are the dynamic notch's job (one notch per stripe, Rosser), never the RPM filter's.`,
     });
 
     const filters: Record<string, number> = {};
@@ -379,25 +426,19 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
     const maxPerAxis = Math.max(
       ...AXES.map((a) => resonances.filter((r) => r.axes.includes(a)).length),
     );
+    const minFreq = Math.min(...resonances.map((r) => r.freqHz));
+    const maxFreq = Math.max(...resonances.map((r) => r.freqHz));
+    const targetMin = Math.max(DYN_NOTCH_MIN_FLOOR_HZ, Math.round(minFreq - 25));
+    const targetMax = Math.min(1000, Math.round(maxFreq * 1.5));
     if (baseCount === 0) {
       // Notch disabled but resonance present → enable with matching count.
       // dynNotchCount is safe as an absolute because the base is 0; the
       // min/max must be deltas like everywhere else (applyChanges resolves
       // every numeric change as base + delta when the base defines the key).
-      const count = Math.min(maxPerAxis, rpmActive ? 2 : 3);
-      filters.dynNotchCount = count;
-      const targetMin = Math.max(
-        DYN_NOTCH_MIN_FLOOR_HZ,
-        Math.round(Math.min(...resonances.map((r) => r.freqHz)) - 25),
-      );
-      const targetMax = Math.min(1000, Math.round(Math.max(...resonances.map((r) => r.freqHz)) * 1.5));
+      filters.dynNotchCount = Math.min(maxPerAxis, rpmActive ? 2 : 3);
       if (targetMin !== baseMin) filters.dynNotchMinHz = targetMin - baseMin;
       if (targetMax !== baseMax) filters.dynNotchMaxHz = targetMax - baseMax;
     } else {
-      const minFreq = Math.min(...resonances.map((r) => r.freqHz));
-      const maxFreq = Math.max(...resonances.map((r) => r.freqHz));
-      const targetMin = Math.max(DYN_NOTCH_MIN_FLOOR_HZ, Math.round(minFreq - 25));
-      const targetMax = Math.min(1000, Math.round(maxFreq * 1.5));
       if (targetMin < baseMin) filters.dynNotchMinHz = targetMin - baseMin;
       if (targetMax > baseMax) filters.dynNotchMaxHz = targetMax - baseMax;
       // Match the notch count to the per-axis resonance count (fewer = less delay).
@@ -405,13 +446,12 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
       else if (maxPerAxis > baseCount && baseCount < 3) {
         filters.dynNotchCount = Math.min(maxPerAxis, 3) - baseCount;
       }
-      // Narrow, well-defined resonance → tighten the Q (less delay). Verify in
-      // the next log that the resonance stays covered.
-      const narrowest = resonances.reduce((a, b) =>
-        (a.spreadHz ?? Infinity) < (b.spreadHz ?? Infinity) ? a : b,
-      );
-      if (narrowest.spreadHz !== null && narrowest.spreadHz < 8 && baseQ < 1000) {
-        filters.dynNotchQ = Math.min(100, 1000 - baseQ);
+      // Range and count already cover the stripe, yet it leaks: the notch is
+      // too tight and the noise escapes on either side of it (Rosser) —
+      // widen it. Never tighten a notch whose stripe is visible.
+      const rangeOrCountChanged = Object.keys(filters).length > 0;
+      if (!rangeOrCountChanged && minFreq >= baseMin && maxFreq <= baseMax && baseQ > 300) {
+        filters.dynNotchQ = -Math.min(100, baseQ - 300);
       }
     }
 
@@ -420,29 +460,58 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
         {
           id: "resonance-notch",
           severity: "info",
-          title: "Adjust dynamic notch to cover the resonance",
-          detail: `Keep the notch minimum at/above ${DYN_NOTCH_MIN_FLOOR_HZ} Hz so it never hunts into the PID-relevant band.`,
+          title: filters.dynNotchQ !== undefined ? "Widen the dynamic notch (noise escapes beside it)" : "Adjust dynamic notch to cover the resonance",
+          detail:
+            filters.dynNotchQ !== undefined
+              ? `The stripe sits inside the notch range with enough notches, so the notch is on it but too narrow (Q ${baseQ}) — lower Q in 100 steps until the filtered gyro is clean, then push it back up only while the stripe stays notched.`
+              : `Keep the notch minimum at/above ${DYN_NOTCH_MIN_FLOOR_HZ} Hz (ideally 150) so it never hunts into the PID-relevant band; the maximum is not critical — just above the highest stripe keeps the notch focused.`,
         },
         { filters },
-        "Cover the frame resonance with the dynamic notch; raise Q only while the resonance stays fully notched in follow-up logs.",
+        filters.dynNotchQ !== undefined
+          ? "Lower the dynamic notch Q so the resonance is fully removed; re-check the filtered gyro in the next log."
+          : "Cover the frame resonance with the dynamic notch (min a little below the lowest stripe, one notch per stripe).",
         0.9,
       );
     }
-  } else if (rpmActive && (baseFilters.dynNotchCount ?? 3) > 1) {
-    // Quiet frame + RPM filter: extra notches are idle — keep ONE as insurance
-    // (every whoop/micro vendor tune ships one) and drop the rest, ~0.5 ms
-    // of delay each (Rosser / BF DShot RPM filtering docs).
+  } else if (rpmActive && resonancesRaw.length > 0 && (baseFilters.dynNotchCount ?? 3) > 0) {
+    // Stripe in the RAW gyro, none in the filtered gyro: the notch is doing
+    // exactly its job. Rosser's next move is to tighten it (less delay)
+    // until the stripe starts to show — one Q step at a time.
+    const strongest = resonancesRaw.reduce((a, b) => (a.ratio > b.ratio ? a : b));
+    const baseQ = baseFilters.dynNotchQ ?? 300;
+    const finding: Finding = {
+      id: "notch-working",
+      severity: "info",
+      title: `Dynamic notch removes the ${Math.round(strongest.freqHz)} Hz frame resonance`,
+      detail: `The raw gyro shows a fixed stripe at ${resonancesRaw.map((r) => `${Math.round(r.freqHz)} Hz`).join(", ")} (${strongest.ratio.toFixed(1)}× the floor on ${strongest.axes.map((a) => AXIS_LABEL[a]).join("/")}) that is gone from the filtered gyro. Keep the notch; a tighter notch (higher Q) costs less delay as long as the stripe stays notched (Rosser: not much above 1000).`,
+    };
+    if (baseQ < NOTCH_Q_MAX) {
+      add(
+        finding,
+        { filters: { dynNotchQ: Math.min(100, NOTCH_Q_MAX - baseQ) } },
+        "Tighten the dynamic notch one step (+100 Q) for less delay; back off as soon as the resonance reappears in the filtered gyro.",
+        0.3,
+      );
+    } else {
+      findings.push(finding);
+    }
+  } else if (rpmActive && (baseFilters.dynNotchCount ?? 3) > 0) {
+    // No stripe anywhere: the notch is idling and only adds delay. Rosser and
+    // the Betaflight docs both switch it off on a quiet frame with RPM
+    // filtering; without the raw gyro the evidence is weaker (the notch
+    // itself could be hiding the stripe), so the recommendation is too.
     add(
       {
         id: "quiet-frame",
         severity: "info",
-        title: "No frame resonance — one dynamic notch is enough",
-        detail:
-          "With RPM filtering active and no fixed-frequency resonance stripes, additional dynamic notches only add delay without benefit. One notch stays as insurance against a resonance that appears with a new frame, props or a knock.",
+        title: rawAvailable ? "No frame resonance — the dynamic notch can be switched off" : "No frame resonance in the filtered gyro — the dynamic notch may be idle",
+        detail: rawAvailable
+          ? "Neither the raw nor the filtered gyro shows a fixed-frequency stripe. With RPM filtering handling the motors, a dynamic notch that finds nothing only costs delay (~1 ms); Rosser and the Betaflight docs disable it on quiet frames. Re-check after a crash, new props or a new frame — a stripe that appears then needs the notch back."
+          : "The filtered gyro shows no fixed stripe, but this log has no raw gyro channel, so the notch itself may be what hides it. Log with Betaflight 4.5 (raw gyro is always recorded) before switching the notch off.",
       },
-      { filters: { dynNotchCount: 1 - (baseFilters.dynNotchCount ?? 3) } },
-      "Run a single dynamic notch on this quiet frame to save filter delay. Re-check after the next flight.",
-      0.7,
+      { filters: { dynNotchCount: -(baseFilters.dynNotchCount ?? 3) } },
+      "Disable the dynamic notch (count 0) on this quiet frame to save filter delay; re-enable it if a resonance appears in a later log.",
+      rawAvailable ? 0.7 : 0.35,
     );
   } else if (!rpmActive) {
     add({
@@ -457,11 +526,15 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
   // ------------------------------------------------------------------
   // 2. RPM filter tuning (motor noise onset/fade/Q/weights)
   // ------------------------------------------------------------------
-  if (rpmActive && motorPeaks.length > 0 && metrics.spectral) {
-    const onsets = metrics.spectral
+  // The raw gyro shows the motor ridge from where it starts (the filtered one
+  // only what the RPM notches miss), so it is the better source for the
+  // crossfade — Rosser reads the onset off the unfiltered view.
+  const onsetSource = metrics.spectralRaw ?? metrics.spectral;
+  if (rpmActive && (motorPeaks.length > 0 || motorPeaksRaw.length > 0) && onsetSource) {
+    const onsets = onsetSource
       .map((s) => s.motorNoiseOnsetHz)
       .filter((v): v is number => v !== null);
-    const strongs = metrics.spectral
+    const strongs = onsetSource
       .map((s) => s.motorNoiseStrongHz)
       .filter((v): v is number => v !== null);
 
@@ -471,8 +544,13 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
       const baseMin = baseFilters.rpmFilterMinHz ?? 100;
       const baseFade = baseFilters.rpmFilterFadeRangeHz ?? 50;
 
-      const targetMin = clamp(Math.round((onset * 0.9) / 5) * 5, 30, 200);
-      const targetFade = clamp(Math.round((strong - targetMin) / 5) * 5, 25, 200);
+      // Rosser: larger builds start the RPM filter lower and fade in faster;
+      // smaller builds can start higher and fade in longer. Every whoop tune
+      // (BetaFPV, AOS 65mm, Karate) keeps the minimum at 100 Hz and Karate
+      // stretches the fade to 120, so the minimum is never raised above the
+      // default and the fade is what grows.
+      const targetMin = clamp(Math.round((onset * 0.9) / 5) * 5, 30, Math.max(100, baseMin));
+      const targetFade = clamp(Math.round((strong - targetMin) / 5) * 5, 25, 120);
 
       const filters: Record<string, number> = {};
       if (Math.abs(targetMin - baseMin) >= 10) filters.rpmFilterMinHz = targetMin - baseMin;
@@ -486,7 +564,7 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
             detail: `RPM filters should fade in where motor noise actually begins and reach full strength by ~${Math.round(strong)} Hz (crossfading).`,
           },
           { filters },
-          "Fade the RPM filters in over the range where motor noise appears — full strength too late lets noise through, too early wastes delay. (Fade range is CLI-only on BF 4.4/4.5.)",
+          "Fade the RPM filters in over the range where motor noise appears (Rosser: full strength by the time the noise gets strong; Brian White: minimum 25-30 Hz below the lowest motor line) — full strength too late lets noise through, too early wastes delay. (Fade range is CLI-only on BF 4.4/4.5.)",
           0.6,
         );
       }
@@ -531,30 +609,79 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
       );
     }
 
-    // Per-harmonic weights from the observed harmonic pattern (Rosser:
-    // tri-blade ≈ 100,0,80 — almost no 2nd harmonic; bi-blade keeps the 2nd).
-    const fundamental = motorPeaks.reduce((a, b) => (a.freqHz < b.freqHz ? a : b));
-    const known = motorPeaks.some((p) => p.harmonic !== undefined);
-    const h2 = known
-      ? motorPeaks.find((p) => p.harmonic === 2 && p.ratioToFloor > 4)
-      : motorPeaks.find((p) => Math.abs(p.freqHz / fundamental.freqHz - 2) < 0.2 && p.ratioToFloor > 4);
-    const baseW2 = baseFilters.rpmFilterWeight2 ?? 100;
-    // The filtered gyro cannot show a 2nd harmonic the RPM filter already
-    // notches, so with eRPM-identified harmonics this rule has no evidence
-    // to stand on; it only runs on the legacy throttle-correlation path.
-    if (!h2 && baseW2 > 0 && !known && baseHarmonics >= 2) {
-      add(
-        {
-          id: "rpm-weights",
-          severity: "info",
-          title: "No 2nd motor harmonic — dim its RPM notch",
-          detail:
-            "The log shows the tri-blade pattern (fundamental + 3rd harmonic, almost no 2nd). Dropping the 2nd harmonic's weight to 0 removes an unneeded notch and its delay.",
-        },
-        { filters: { rpmFilterWeight2: -baseW2, rpmFilterWeight3: -20 } },
-        "Suggested weights 100,0,80 (tri-blade pattern). CLI-only on BF 4.4/4.5 — apply via the snippet.",
-        0.5,
-      );
+    // Per-harmonic weights (BF 4.5 "RPM filter dimming") from the harmonic
+    // pattern of the RAW gyro: Rosser's starting points are 100,0,80 for
+    // tri-blades (almost no 2nd harmonic) and 100,80,0 for bi-blades; Brian
+    // White dims a weak 2nd to ~50. A harmonic that still leaks into the
+    // filtered gyro is never dimmed.
+    const baseW = [
+      baseFilters.rpmFilterWeight1 ?? 100,
+      baseFilters.rpmFilterWeight2 ?? 100,
+      baseFilters.rpmFilterWeight3 ?? 100,
+    ];
+    // Harmonic strengths are measured at the eRPM-predicted frequencies
+    // (harmonicRatios), not taken from the peak list: the fundamental's
+    // skirt crowds the 2nd/3rd out of the per-row peaks on a whoop. Needs a
+    // ≥ 1.5 kHz log so the folded 2nd/3rd harmonics land on their own.
+    const rawRatios = (metrics.spectralRaw ?? [])
+      .map((sp) => sp.harmonicRatios)
+      .filter((r): r is [number, number, number] => !!r);
+    const filtRatios = (metrics.spectral ?? [])
+      .map((sp) => sp.harmonicRatios)
+      .filter((r): r is [number, number, number] => !!r);
+    if (rawAvailable && rawRatios.length > 0 && baseHarmonics >= 2 && metrics.sampleRateHz >= 1500) {
+      const strength = (k: number, set: [number, number, number][]) => Math.max(...set.map((r) => r[k - 1]!));
+      const h1 = strength(1, rawRatios);
+      const leaks = (k: number) => filtRatios.length > 0 && strength(k, filtRatios) > 4;
+      const targetFor = (k: number): number => {
+        if (leaks(k)) return 100;
+        const hk = strength(k, rawRatios);
+        if (hk <= 4) return 0; // not visible in the raw gyro → the notch removes nothing
+        return h1 > 0 && hk < 0.5 * h1 ? 80 : 100;
+      };
+      if (h1 > 4) {
+        const target = [100, targetFor(2), baseHarmonics >= 3 ? targetFor(3) : baseW[2]!];
+        const changes: Record<string, number> = {};
+        if (target[1] !== baseW[1]) changes.rpmFilterWeight2 = target[1]! - baseW[1]!;
+        if (target[2] !== baseW[2]) changes.rpmFilterWeight3 = target[2]! - baseW[2]!;
+        if (Object.keys(changes).length > 0) {
+          const pattern = target[1] === 0 ? "tri-blade pattern (fundamental + 3rd, no 2nd)" : target[2] === 0 ? "bi-blade pattern (fundamental + 2nd, no 3rd)" : "harmonic pattern";
+          add(
+            {
+              id: "rpm-weights",
+              severity: "info",
+              title: `RPM notch weights ${target.join(",")} match the raw gyro's ${pattern}`,
+              detail: `In the raw gyro the fundamental is ${h1.toFixed(0)}× the floor, the 2nd harmonic ${strength(2, rawRatios).toFixed(0)}× and the 3rd ${strength(3, rawRatios).toFixed(0)}×. A notch on a harmonic that is not there only adds delay (Rosser: "decrease the weights as long as motor noise is not visible in the filtered gyro"; Brian White dims a weak 2nd to ~50).`,
+            },
+            { filters: changes },
+            `Set rpm_filter_weights = ${target.join(",")} (CLI-only on BF 4.4/4.5). Back to 100 for any harmonic that reappears in the filtered gyro.`,
+            0.5,
+          );
+        }
+      }
+    } else if (!rawAvailable) {
+      // Legacy path (no raw gyro, no eRPM identification): the filtered gyro
+      // cannot show a 2nd harmonic the RPM filter already notches, so only the
+      // throttle-correlation classification can hint at the pattern.
+      const fundamental = motorPeaks.length > 0 ? motorPeaks.reduce((a, b) => (a.freqHz < b.freqHz ? a : b)) : null;
+      const known = motorPeaks.some((p) => p.harmonic !== undefined);
+      const h2 = fundamental
+        ? motorPeaks.find((p) => Math.abs(p.freqHz / fundamental.freqHz - 2) < 0.2 && p.ratioToFloor > 4)
+        : undefined;
+      if (fundamental && !h2 && baseW[1]! > 0 && !known && baseHarmonics >= 2) {
+        add(
+          {
+            id: "rpm-weights",
+            severity: "info",
+            title: "No 2nd motor harmonic — dim its RPM notch",
+            detail:
+              "The log shows the tri-blade pattern (fundamental + 3rd harmonic, almost no 2nd). Dropping the 2nd harmonic's weight to 0 removes an unneeded notch and its delay.",
+          },
+          { filters: { rpmFilterWeight2: -baseW[1]!, rpmFilterWeight3: -20 } },
+          "Suggested weights 100,0,80 (tri-blade pattern). CLI-only on BF 4.4/4.5 — apply via the snippet.",
+          0.5,
+        );
+      }
     }
   }
 
@@ -565,7 +692,7 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
         id: "rpm-q-tighten",
         severity: "info",
         title: "RPM notches could be narrower",
-        detail: `No motor harmonics leak into the filtered gyro, so Q ${baseQ} → 750 would trim delay. Optional: verify in the next log that motor noise stays fully notched (clean builds go toward 1000).`,
+        detail: `No motor harmonics leak into the filtered gyro, so Q ${baseQ} → 750 would trim delay (Rosser and Brian White both push the RPM Q toward 1000 and stop when motor noise reappears in the filtered gyro). Optional: verify in the next log that motor noise stays fully notched.`,
       },
       { filters: { rpmFilterQ: 750 - baseQ } },
       "Tighter RPM notches for less delay (CLI-only on BF 4.4/4.5). Back off if motor noise appears in the filtered gyro.",
@@ -600,12 +727,12 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
         {
           id: "gyro-lpf2",
           severity: "info",
-          title: "Gyro LPF2 can be disabled (gyro rate = PID rate)",
-          detail: `Gyro and PID loop both run at ${gyroRate} Hz — no aliasing can occur, so the anti-aliasing filter is pure delay. Safe here because the RPM filter handles motor noise; without RPM filtering LPF2 would stay as the only motor-noise low-pass.`,
+          title: "Gyro LPF2 could be disabled (gyro rate = PID rate)",
+          detail: `Gyro and PID loop both run at ${gyroRate} Hz. Rosser: with equal rates there is no aliasing, so LPF2 can be switched off — "if in doubt leave it on at 1000 Hz". Brian White keeps it on always (a PT1 is not a hard wall). Optional, and only with the RPM filter handling the motors.`,
         },
         { filters: { gyroLowpass2Hz: -baseLpf2 } },
-        "Disable gyro LPF2 when the gyro rate equals the PID loop rate.",
-        0.6,
+        "Optional: disable gyro LPF2 when the gyro rate equals the PID loop rate; raising it to 1000 Hz is the safe middle.",
+        0.3,
       );
     }
   }
@@ -627,18 +754,18 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
     let detail: string;
 
     if (bandsAvailable && dHigh > DTERM_NOISY && dHigh > dLow * 1.3) {
-      const baseMax = baseFilters.dtermLowpassDynMaxHz ?? 170;
+      const baseMax = baseFilters.dtermLowpassDynMaxHz ?? 150;
       filters.dtermLowpassDynMaxHz = -Math.max(10, Math.round(baseMax * 0.1));
       detail =
         "D-term noise is concentrated at high throttle — lower the D-term dyn LPF MAX cutoff (full-throttle filtering).";
     } else if (bandsAvailable && dLow > DTERM_NOISY && dLow > dHigh * 1.3) {
-      const baseMin = baseFilters.dtermLowpassDynMinHz ?? 70;
+      const baseMin = baseFilters.dtermLowpassDynMinHz ?? 75;
       filters.dtermLowpassDynMinHz = -Math.max(5, Math.round(baseMin * 0.1));
       detail =
         "D-term noise is concentrated at low throttle — lower the D-term dyn LPF MIN cutoff (zero-throttle filtering).";
     } else {
-      const baseMax = baseFilters.dtermLowpassDynMaxHz ?? 170;
-      const baseMin = baseFilters.dtermLowpassDynMinHz ?? 70;
+      const baseMax = baseFilters.dtermLowpassDynMaxHz ?? 150;
+      const baseMin = baseFilters.dtermLowpassDynMinHz ?? 75;
       filters.dtermLowpassDynMaxHz = -Math.max(10, Math.round(baseMax * 0.1));
       filters.dtermLowpassDynMinHz = -Math.max(5, Math.round(baseMin * 0.1));
       detail = "D-term noise is high across the throttle range — lower both dynamic D-term cutoffs.";
@@ -657,25 +784,50 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
     );
   }
 
-  // TPA hint: noise only at high throttle with a clean low end.
+  // TPA hint: noise only at high throttle with a clean low end. tpa_rate is
+  // the attenuation at full throttle (65 = gains × 0.35), so MORE attenuation
+  // is a HIGHER rate; the breakpoint goes just below the throttle where the
+  // high-throttle noise starts (Rosser).
   if (bandsAvailable && dHigh > 150 && dLow < 80) {
-    add(
-      {
-        id: "tpa-hint",
-        severity: "info",
-        title: "High-throttle-only noise — consider TPA",
-        detail:
-          "Noise appears only at high throttle. TPA gracefully reduces PID gains as throttle rises; set the breakpoint just below where the noise starts and increase attenuation until it clears.",
-      },
-      { advanced: { tpaRate: -5 } },
-      "Lower TPA rate slightly (more attenuation at full throttle). Alternative to lowering the D-term dyn max if the low-throttle tune feels perfect.",
-      0.4,
-    );
+    const baseRate = effectiveBase.advanced?.tpaRate ?? 65;
+    const baseBreak = effectiveBase.advanced?.tpaBreakpoint ?? 1350;
+    const changes: Record<string, number> = {};
+    if (baseRate < 100) changes.tpaRate = Math.min(5, 100 - baseRate);
+    const highStart = metrics.throttleBands?.highMinUs;
+    if (highStart !== undefined) {
+      const targetBreak = clamp(Math.round((highStart - 50) / 10) * 10, 1000, 2000);
+      if (targetBreak < baseBreak) changes.tpaBreakpoint = targetBreak - baseBreak;
+    }
+    if (Object.keys(changes).length > 0) {
+      add(
+        {
+          id: "tpa-hint",
+          severity: "info",
+          title: "High-throttle-only noise — let TPA attenuate it",
+          detail: `D-term noise appears only in the top throttle band${highStart !== undefined ? ` (from about ${highStart} µs)` : ""} with a clean low end. TPA reduces the D gain as throttle rises: put the breakpoint just below where the noise starts and raise tpa_rate (more attenuation at full throttle) until it clears; switch tpa_mode to PD only if the P-term oscillates at high throttle too (Rosser).`,
+        },
+        { advanced: changes },
+        "More TPA attenuation, starting just below the noisy throttle band. Alternative to lowering the D-term dyn max when the low-throttle tune feels perfect.",
+        0.4,
+      );
+    }
+  }
+
+  // D-term filter headroom: the D-term is quiet in every throttle band, so
+  // Rosser's "raise the D-term multiplier 0.1-0.2 at a time until the motors
+  // get rough or warm" applies — the crisp A/B pair is that step.
+  if (rpmActive && bandsAvailable && Math.max(dHigh, dLow, dAll) < DTERM_QUIET && metrics.motorSaturationPercent < 5) {
+    findings.push({
+      id: "dterm-headroom",
+      severity: "info",
+      title: "D-term is quiet — the D-term filtering has headroom",
+      detail: `D-term noise stays below ${DTERM_QUIET} (raw units) at low and high throttle. Rosser tunes the D-term filters upward until the motors sound rough or come down warm, then backs off a step; fly the "Balanced vs Crisp" pair (D chain × 1.25) in the wizard, and if it wins raise dterm_lpf1_dyn_expo above 5 next (cutoffs rise faster at low throttle for less delay).`,
+    });
   }
 
   // ------------------------------------------------------------------
-  // 5. Step response: PD balance (D-first), I from steady-state error,
-  //    FF from start lag / end overshoot
+  // 5. Step response (Rosser / Brian White): P:D ratio first, I from a
+  //    drooping tail or slow overshoot, FF from start lag / end overshoot
   // ------------------------------------------------------------------
   for (const sr of metrics.stepResponse) {
     // Explicit steps or enough deconvolution windows — a couple of stick
@@ -684,34 +836,70 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
     const axis = sr.axis;
     const label = AXIS_LABEL[axis];
     const basePid = effectiveBase.pids![axis]!;
+    const p = basePid.p ?? 0;
+    const i = basePid.i ?? 0;
+    const d = basePid.d ?? 0;
+    const pct = (v: number, f: number) => Math.max(1, Math.round(v * f));
 
     // Optional step fields are absent in pre-overhaul persisted analyses.
     const ringing = sr.ringingCycles ?? 0;
+    const peakTime = sr.peakTimeMs;
+    // Brian White: a fast, sharp overshoot is the P:D ratio; a slow, drawn-out
+    // one (peak well after the rise) is too much I-term.
+    const slowPeak = peakTime !== undefined && peakTime > Math.max(60, sr.riseTimeMs * 3);
     // Track under-damped axes so the FF end-overshoot rule below doesn't
     // co-fire a contradictory change for what may be the same symptom.
     let dampingIssue = false;
-    if (sr.overshootPercent > 25 || ringing >= 2) {
+    if ((sr.overshootPercent > 25 || ringing >= 2) && slowPeak && i > 0) {
       dampingIssue = true;
-      // Under-damped. D is the shock absorber — raise it first; only cut P
-      // when D is already near the top of the healthy D/P band (0.45–0.85).
-      const p = basePid.p ?? 0;
-      const d = basePid.d ?? 0;
+      add(
+        {
+          id: `iterm-high-${axis}`,
+          severity: "warning",
+          title: `${label} overshoots slowly (${sr.overshootPercent.toFixed(0)}%, peak at ${Math.round(peakTime!)} ms)`,
+          detail:
+            "The overshoot builds up long after the rise — the slow, drawn-out shape of too much I-term (Brian White), not the sharp overshoot of a P:D imbalance. Too much I also shows as bounce-back after fast moves.",
+        },
+        { pids: { [axis]: { i: -pct(i, 0.1) } } },
+        "Lower I by 10 % (one slider step) and re-check; if the tail then droops below the setpoint, meet in the middle.",
+        0.7,
+      );
+    } else if (sr.overshootPercent > 25 || ringing >= 2) {
+      dampingIssue = true;
+      // Under-damped: fix the P:D ratio. Rosser lowers P (and I with it —
+      // the "tracking" slider) against a D set by the master multiplier;
+      // Brian White raises D. Both move the ratio the same way; on 1S whoops
+      // lowering P is the cooler option, so D is raised only when it is
+      // abnormally low for the P it has to damp.
       const dpRatio = p > 0 ? d / p : 0;
-      const raiseD = axis !== "yaw" && dpRatio < 0.85;
+      const raiseD = axis !== "yaw" && dpRatio < 0.6;
       add(
         {
           id: `overshoot-${axis}`,
           severity: "warning",
           title: `${label} under-damped (${sr.overshootPercent.toFixed(0)}% overshoot${ringing >= 2 ? ", ringing" : ""})`,
           detail: raiseD
-            ? `${label} D/P ratio is ${dpRatio.toFixed(2)} — there is room to add damping before sacrificing P authority.`
-            : `${label} D/P ratio is already ${dpRatio.toFixed(2)} — reduce P instead of adding more D.`,
+            ? `${label} D/P ratio is ${dpRatio.toFixed(2)} — well below the 0.65-1.0 of every whoop and Betaflight tune, so there is damping missing rather than too much P.`
+            : `${label} D/P ratio is ${dpRatio.toFixed(2)}, in the normal band: the loop has more P than its damping can hold. Rosser's fix is one tracking-slider step down (P and I −10 %); Brian White would raise D instead — the same ratio change, hotter motors. A tiny overshoot is fine, oscillation is not.${ringing >= 2 && sr.overshootPercent <= 25 ? " Sustained ringing at a high master multiplier is pure-P feedback and is not fixed by more D." : ""}`,
         },
-        { pids: { [axis]: raiseD ? { d: 3 } : { p: -3 } } },
+        { pids: { [axis]: raiseD ? { d: pct(d || 10, 0.1) } : { p: -pct(p, 0.1), i: -pct(i, 0.1) } } },
         raiseD
-          ? "Raise D to damp the overshoot (D-first PD balance). If motors come down hot, revert and reduce P instead."
-          : "Reduce P to calm the overshoot; D is already high relative to P.",
+          ? "Raise D to damp the overshoot (D is abnormally low for this P). If motors come down hot, revert and lower P and I instead."
+          : "Lower P and I by 10 % on this axis (Rosser's tracking slider, one step) to calm the overshoot; fly the Tracking A/B pair to confirm.",
         0.8,
+      );
+    } else if (sr.overshootPercent > 15 && ringing >= 1) {
+      dampingIssue = true;
+      add(
+        {
+          id: `overshoot-${axis}`,
+          severity: "info",
+          title: `${label} slightly under-damped (${sr.overshootPercent.toFixed(0)}% overshoot, ${ringing} cycle)`,
+          detail: "More than the hair of overshoot Rosser accepts, with one visible bounce. Half a tracking-slider step down brings the P:D ratio back; if the response was already crisp, leave it.",
+        },
+        { pids: { [axis]: { p: -pct(p, 0.05), i: -pct(i, 0.05) } } },
+        "Lower P and I by 5 % on this axis; optional.",
+        0.5,
       );
     } else if (sr.riseTimeMs > 50 && sr.overshootPercent < 10) {
       add(
@@ -719,44 +907,67 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
           id: `slow-${axis}`,
           severity: "info",
           title: `${label} response is slow (${sr.riseTimeMs.toFixed(0)} ms rise)`,
-          detail: "Over-damped or low P — the quad takes too long to reach the setpoint.",
+          detail:
+            "Over-damped: the gyro takes too long to reach the setpoint with no overshoot. One tracking-slider step up (P and I +10 %) or, if the whole quad feels soft, one master step (fly the Master A/B pair). Brian White: a loop with too little gain also gives vague step-response data — raise it and re-log.",
         },
-        { pids: { [axis]: { p: 3 } } },
-        "Raise P for a crisper response; stop if overshoot or oscillation appears.",
+        { pids: { [axis]: { p: pct(p, 0.1), i: pct(i, 0.1) } } },
+        "Raise P and I by 10 % on this axis for a crisper response; stop as soon as overshoot or oscillation appears.",
         0.6,
       );
     }
 
     const sse = sr.steadyStateErrorPercent ?? 0;
-    if (sse > 5) {
+    if (sse > 5 && !dampingIssue) {
       add(
         {
           id: `iterm-${axis}`,
           severity: "info",
           title: `${label} steady-state error ${sse.toFixed(0)}%`,
           detail:
-            "The gyro settles away from the held setpoint — the I-term winds up too slowly to remove the systematic error.",
+            "The gyro settles away from the held setpoint — the tail of the step response droops instead of holding flat, which Brian White reads as too little I-term (it winds up too slowly to remove the systematic error).",
         },
-        { pids: { [axis]: { i: 5 } } },
-        "Raise I so persistent error is corrected faster. Back off if slow bounce-backs appear after fast moves.",
+        { pids: { [axis]: { i: pct(i, 0.1) } } },
+        "Raise I by 10 % so persistent error is corrected faster. Back off if slow bounce-backs appear after fast moves.",
         0.55,
       );
     }
 
-    // Feedforward: start-of-move lag vs end-of-move overshoot (Rosser).
+    // Feedforward (Rosser): a lag through the whole move is too little FF;
+    // a lag only at the start that the gyro then catches up is too little
+    // FF boost; a lead at the start is too much boost; sailing past the
+    // setpoint at the end of a move is too much FF (or a job for dynamic
+    // damping). Brian White: with FF active on a 500 Hz link the step tool
+    // exaggerates overshoot — judge FF on the raw setpoint/gyro overlay.
     const ffLag = sr.ffStartLagMs ?? 0;
-    if (ffLag > 15) {
+    const ffKey = FF_KEY[axis];
+    const baseFf = effectiveBase.advanced?.[ffKey] ?? 0;
+    if (ffLag > 15 && sse > 5) {
       add(
         {
           id: `ff-lag-${axis}`,
           severity: "info",
           title: `${label} gyro lags the sticks (${ffLag.toFixed(0)} ms)`,
           detail:
-            "At the start of sharp moves the gyro falls behind the setpoint — feedforward is too low to push the quad into the move.",
+            "The gyro falls behind the setpoint at the start of sharp moves and stays behind — feedforward is too low to push the quad into the move (Rosser: raise the stick-response slider until an overshoot appears at the start or end of a sharp move, then back off). Brian White: FF 0.5 buys roughly 6 ms, FF 1.0 roughly 12 ms.",
         },
-        { advanced: { [`feedforward${label}`]: 10 } },
-        "Raise feedforward for tighter stick tracking. If the gyro starts leading the setpoint instead, add FF boost rather than more FF.",
+        { advanced: { [ffKey]: baseFf === 0 ? 50 : 10 } },
+        baseFf === 0
+          ? "Add feedforward (50) for tighter stick tracking — fly the Feedforward A/B pair first; indoor precision tunes deliberately run 0."
+          : "Raise feedforward for tighter stick tracking. If the gyro starts leading the setpoint instead, add FF boost rather than more FF.",
         0.6,
+      );
+    } else if (ffLag > 15) {
+      add(
+        {
+          id: `ff-lag-${axis}`,
+          severity: "info",
+          title: `${label} gyro lags at the start of moves (${ffLag.toFixed(0)} ms) but catches up`,
+          detail:
+            "Only the start of the move is late — Rosser's cue for feedforward boost (it ramps FF up faster from stick acceleration) rather than more FF. If the quad is responsive, feedforward_max_rate_limit 92-95 also lets FF push a little longer.",
+        },
+        { advanced: { feedforwardBoost: 3 } },
+        "Raise FF boost a step so feedforward ramps up faster at the start of a move.",
+        0.5,
       );
     } else if (ffLag < -5) {
       add(
@@ -764,7 +975,7 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
           id: `ff-boost-${axis}`,
           severity: "info",
           title: `${label} gyro leads the sticks at move start`,
-          detail: "The gyro gets ahead of the setpoint at the start of moves — feedforward boost ramps the push too aggressively.",
+          detail: "The gyro gets ahead of the setpoint at the start of moves — feedforward boost ramps the push too aggressively (Rosser: reduce boost).",
         },
         { advanced: { feedforwardBoost: -3 } },
         "Reduce FF boost so feedforward ramps up at the rate the quad can actually follow.",
@@ -781,18 +992,18 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
           severity: "warning",
           title: `${label} overshoots at the end of moves (${sr.ffEndOvershootPercent.toFixed(0)}%)`,
           detail:
-            "When the stick returns, the gyro sails past the setpoint and bounces back. This can be the same under-damping flagged above — fix the D/P balance first, then re-check before touching feedforward.",
+            "When the stick returns, the gyro sails past the setpoint and bounces back. This can be the same under-damping flagged above — fix the P:D balance first, then re-check before touching feedforward.",
         });
-      } else {
+      } else if (baseFf > 0) {
         add(
           {
             id: `ff-end-${axis}`,
             severity: "warning",
             title: `${label} overshoots at the end of moves (${sr.ffEndOvershootPercent.toFixed(0)}%)`,
             detail:
-              "When the stick returns, the gyro sails past the setpoint and bounces back — feedforward keeps pushing when it should let go.",
+              "When the stick returns, the gyro sails past the setpoint and bounces back — feedforward keeps pushing when it should let go (Rosser). The alternative is to keep the FF and let dynamic damping boost D on sharp moves (raise d_max_gain). With a 500 Hz link the step tool exaggerates this; confirm on the raw setpoint/gyro trace.",
           },
-          { advanced: { [`feedforward${label}`]: -10 } },
+          { advanced: { [ffKey]: -10 } },
           "Reduce feedforward until the gyro returns cleanly onto the setpoint at the end of sharp moves.",
           0.65,
         );
@@ -803,7 +1014,7 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
   // Say where the step numbers come from (explicit stick steps vs system
   // identification), so a finding can be judged against its evidence.
   for (const f of findings) {
-    const m = /^(overshoot|slow|iterm|ff-lag|ff-boost|ff-end)-(roll|pitch|yaw)$/.exec(f.id);
+    const m = /^(overshoot|slow|iterm|iterm-high|ff-lag|ff-boost|ff-end)-(roll|pitch|yaw)$/.exec(f.id);
     if (!m) continue;
     const sr = metrics.stepResponse.find((s) => s.axis === m[2]);
     if (sr && !f.detail.includes("stick step") && !f.detail.includes("system identification")) {
@@ -859,6 +1070,76 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
   }
 
   // ------------------------------------------------------------------
+  // 9. Settings the masterclass calls out that only the log headers carry
+  // ------------------------------------------------------------------
+  const flownAdv = flown?.advanced ?? {};
+  if ((flownAdv.dMaxAdvance ?? 0) > 0) {
+    add(
+      {
+        id: "dmax-advance",
+        severity: "info",
+        title: `d_max_advance is ${flownAdv.dMaxAdvance} — Rosser sets it to 0`,
+        detail:
+          "Dynamic damping \"advance\" mixes a setpoint-derived component into the D-term. Rosser: \"should always, under all circumstances, be set to zero\" — D belongs to the gyro only. His AOS 65mm preset, whoop_justice and Happymodel's whoop dumps all run 0; Betaflight's default is 20.",
+      },
+      { advanced: { dMaxAdvance: -(effectiveBase.advanced?.dMaxAdvance ?? flownAdv.dMaxAdvance ?? 0) } },
+      "Set d_max_advance to 0 (dynamic damping gain stays as it is).",
+      0.5,
+    );
+  }
+  const extras = metrics.flownExtras;
+  if (extras?.absControlGain !== undefined && extras.absControlGain > 0) {
+    findings.push({
+      id: "abs-control",
+      severity: "info",
+      title: `Absolute control is on (abs_control_gain ${extras.absControlGain})`,
+      detail:
+        "Rosser tested absolute control and I-term rotation and found they do not reduce PID error and sometimes increase it; he recommends leaving both off. CLI: set abs_control_gain = 0.",
+    });
+  }
+  if (
+    extras?.pidsumLimit !== undefined &&
+    extras.pidsumLimit < 1000 &&
+    metrics.motorSaturationPercent < 5
+  ) {
+    const finding: Finding = {
+      id: "pidsum-limit",
+      severity: "info",
+      title: `pidsum_limit ${extras.pidsumLimit}${extras.pidsumLimitYaw !== undefined ? ` / yaw ${extras.pidsumLimitYaw}` : ""} caps the PID controller`,
+      detail:
+        "Optional (Rosser: \"unleash your PID controller\"): pidsum_limit and pidsum_limit_yaw at 1000 let the loop ask the mixer for more on fast moves. UAV Tech's whoop presets and the Karate whoop tune (yaw) use 1000. Motors are not saturating in this log, so there is headroom to give; skip it if they start to.",
+    };
+    findings.push(finding);
+    recommendations.push({
+      id: `rec-${recommendations.length + 1}`,
+      findingId: finding.id,
+      rationale: "Raise the PID-sum limits to 1000 (CLI only) for more authority on sharp moves.",
+      changes: {},
+      score: 0.2,
+      cliLines: ["set pidsum_limit = 1000", "set pidsum_limit_yaw = 1000", "save"],
+    });
+  }
+  const rcTarget = RC_SMOOTHING_TARGET[goal];
+  if (extras?.rcSmoothingAutoFactor !== undefined && rcTarget !== undefined && Math.abs(extras.rcSmoothingAutoFactor - rcTarget) >= 10) {
+    const finding: Finding = {
+      id: "rc-smoothing",
+      severity: "info",
+      title: `RC smoothing auto factor ${extras.rcSmoothingAutoFactor} (${goal} usually runs ~${rcTarget})`,
+      detail:
+        "Rosser: Betaflight's default 30 is a racing setting; freestyle wants 50-60 and cinematic 90-100 for a smooth setpoint without gimbal jitter. Each step of smoothing costs a few ms of stick delay (Brian White measured ~8 ms at a 30 Hz cutoff, ~12 ms at 20 Hz), so it is a feel choice, not a tune. Global setting: it cannot be A/B'd between profiles.",
+    };
+    findings.push(finding);
+    recommendations.push({
+      id: `rec-${recommendations.length + 1}`,
+      findingId: finding.id,
+      rationale: `Set rc_smoothing_auto_factor to ${rcTarget} for a ${goal} feel (CLI only; a feel choice, not a tuning fix).`,
+      changes: {},
+      score: 0.25,
+      cliLines: [`set rc_smoothing_auto_factor = ${rcTarget}`, "save"],
+    });
+  }
+
+  // ------------------------------------------------------------------
   // Goal weighting
   // ------------------------------------------------------------------
   const weights: Record<string, Record<string, number>> = {
@@ -879,7 +1160,7 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
 }
 
 /** Merge frame-resonance peaks across axes; group frequencies within 25 Hz. */
-function collectResonances(metrics: LogMetrics): Resonance[] {
+function collectResonances(spectral: AxisSpectralLike[] | undefined, legacy?: LogMetrics): Resonance[] {
   const groups: Resonance[] = [];
   const addPeak = (axis: Axis, freqHz: number, ratio: number, spreadHz: number | null) => {
     const g = groups.find((g) => Math.abs(g.freqHz - freqHz) < 25);
@@ -895,19 +1176,19 @@ function collectResonances(metrics: LogMetrics): Resonance[] {
     }
   };
 
-  if (metrics.spectral) {
-    for (const s of metrics.spectral) {
+  if (spectral) {
+    for (const s of spectral) {
       for (const p of s.peaks) {
         if (p.kind === "frameResonance" && p.ratioToFloor > 4 && p.freqHz >= 80) {
           addPeak(s.axis, p.freqHz, p.ratioToFloor, p.freqSpreadHz);
         }
       }
     }
-  } else {
+  } else if (legacy) {
     // Legacy fallback for analyses persisted before spectral classification:
     // unclassified peaks — still floored at 100 Hz for notch targeting.
-    for (const p of metrics.noisePeaks) {
-      const floor = metrics.noiseFloor[p.axis];
+    for (const p of legacy.noisePeaks) {
+      const floor = legacy.noiseFloor[p.axis];
       const ratio = floor > 0 ? p.magnitude / floor : 0;
       if (ratio > 4 && p.freqHz >= 80 && p.freqHz <= 500) {
         addPeak(p.axis, p.freqHz, ratio, null);
@@ -917,11 +1198,14 @@ function collectResonances(metrics: LogMetrics): Resonance[] {
   return groups.sort((a, b) => b.ratio - a.ratio).slice(0, 3);
 }
 
+/** The subset of AxisSpectral the rules read (keeps the helpers free of the spectrogram module). */
+type AxisSpectralLike = NonNullable<LogMetrics["spectral"]>[number];
+
 function collectMotorPeaks(
-  metrics: LogMetrics,
+  spectral: AxisSpectralLike[] | undefined,
 ): { freqHz: number; ratioToFloor: number; harmonic?: number; aliased?: boolean }[] {
-  if (!metrics.spectral) return [];
-  return metrics.spectral
+  if (!spectral) return [];
+  return spectral
     .flatMap((s) => s.peaks)
     .filter((p) => p.kind === "motorHarmonic" && p.ratioToFloor > 4)
     .map((p) => ({ freqHz: p.freqHz, ratioToFloor: p.ratioToFloor, harmonic: p.harmonic, aliased: p.aliased }))

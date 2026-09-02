@@ -71,8 +71,9 @@ describe("runRules", () => {
     // resonance at 230 → target min = 230-25 = 205, default min is 100 → no change needed
     // count 3 → 1 resonance → recommend count 1 (delta -2)
     expect(rec!.changes.filters?.dynNotchCount).toBe(-2);
-    // narrow resonance (spread 3 Hz) → Q raised from default 300
-    expect(rec!.changes.filters?.dynNotchQ).toBe(100);
+    // a stripe that is still visible in the filtered gyro is never a reason
+    // to tighten the notch (Rosser: raise Q only while the stripe stays notched)
+    expect(rec!.changes.filters?.dynNotchQ).toBeUndefined();
     // never lets the notch hunt below 100 Hz
     const low = runRules(
       baseMetrics({ spectral: [spectral("roll", [peak({ freqHz: 120 })])] }),
@@ -98,19 +99,81 @@ describe("runRules", () => {
     // but the RPM filter crossfade should be tuned to the onset
     const rpm = out.recommendations.find((r) => r.findingId === "rpm-crossfade");
     expect(rpm).toBeDefined();
-    // onset 140 → target min = round(126/5)*5 = 125; default 100 → delta +25
-    expect(rpm!.changes.filters?.rpmFilterMinHz).toBe(25);
+    // onset 140 → the minimum is never raised above the 100 Hz every whoop
+    // tune uses; the fade grows instead: strong 200 − 100 = 100 (default 50 → +50)
+    expect(rpm!.changes.filters?.rpmFilterMinHz).toBeUndefined();
+    expect(rpm!.changes.filters?.rpmFilterFadeRangeHz).toBe(50);
   });
 
-  it("keeps a single dynamic notch on quiet frames with RPM filtering", () => {
+  it("switches the dynamic notch off on quiet frames with RPM filtering (Rosser / BF docs)", () => {
+    // Filtered gyro only: weaker evidence (the notch could be hiding the stripe).
     const out = runRules(baseMetrics(), "freestyle");
     const rec = out.recommendations.find((r) => r.findingId === "quiet-frame");
     expect(rec).toBeDefined();
-    expect(rec!.changes.filters?.dynNotchCount).toBe(-2); // BF default 3 → 1
-    expect(rec!.cliLines?.join("\n")).toContain("set dyn_notch_count = 1");
-    // already at one notch → nothing to trim
-    const one = runRules(baseMetrics(), "freestyle", { filters: { dynNotchCount: 1 } });
-    expect(one.recommendations.find((r) => r.findingId === "quiet-frame")).toBeUndefined();
+    expect(rec!.changes.filters?.dynNotchCount).toBe(-3); // BF default 3 → 0
+    expect(rec!.cliLines?.join("\n")).toContain("set dyn_notch_count = 0");
+    expect(rec!.score).toBeLessThan(0.5);
+    // Raw gyro clean too → confident.
+    const raw = runRules(baseMetrics({ spectralRaw: [spectral("roll", []), spectral("pitch", [])] }), "freestyle");
+    const recRaw = raw.recommendations.find((r) => r.findingId === "quiet-frame");
+    expect(recRaw!.score).toBeGreaterThan(0.5);
+    // already off → nothing to do
+    const off = runRules(baseMetrics(), "freestyle", { filters: { dynNotchCount: 0 } });
+    expect(off.recommendations.find((r) => r.findingId === "quiet-frame")).toBeUndefined();
+  });
+
+  it("reads the raw gyro: a stripe removed by the notch means keep it and tighten one step", () => {
+    const m = baseMetrics({
+      spectral: [spectral("roll", [])],
+      spectralRaw: [spectral("roll", [peak({ freqHz: 230, ratioToFloor: 9 })])],
+    });
+    const out = runRules(m, "freestyle", { filters: { dynNotchCount: 1, dynNotchQ: 500 } });
+    expect(out.recommendations.find((r) => r.findingId === "quiet-frame")).toBeUndefined();
+    const rec = out.recommendations.find((r) => r.findingId === "notch-working");
+    expect(rec).toBeDefined();
+    expect(rec!.changes.filters?.dynNotchQ).toBe(100); // 500 → 600
+    // at Q 1000 the finding stays but nothing is recommended
+    const capped = runRules(m, "freestyle", { filters: { dynNotchCount: 1, dynNotchQ: 1000 } });
+    expect(capped.findings.some((f) => f.id === "notch-working")).toBe(true);
+    expect(capped.recommendations.find((r) => r.findingId === "notch-working")).toBeUndefined();
+  });
+
+  it("widens a notch whose stripe leaks although range and count cover it", () => {
+    const m = baseMetrics({ spectral: [spectral("roll", [peak({ freqHz: 230 })])] });
+    const out = runRules(m, "freestyle", { filters: { dynNotchCount: 1, dynNotchMinHz: 150, dynNotchMaxHz: 500, dynNotchQ: 600 } });
+    const rec = out.recommendations.find((r) => r.findingId === "resonance-notch");
+    expect(rec!.changes.filters?.dynNotchQ).toBe(-100);
+    expect(rec!.changes.filters?.dynNotchMinHz).toBeUndefined();
+  });
+
+  it("derives RPM notch weights from the raw gyro's measured harmonic strengths", () => {
+    const rawRoll = spectral("roll", [peak({ kind: "motorHarmonic", freqHz: 300, ratioToFloor: 20, harmonic: 1, throttleCorr: 0.9, freqSpreadHz: 60 })], {
+      harmonicRatios: [20, 2, 6],
+    });
+    const m = baseMetrics({
+      spectral: [spectral("roll", [], { harmonicRatios: [1.2, 1.1, 1.3] })],
+      spectralRaw: [rawRoll],
+    });
+    const out = runRules(m, "freestyle");
+    const rec = out.recommendations.find((r) => r.findingId === "rpm-weights");
+    expect(rec).toBeDefined();
+    expect(rec!.cliLines?.join("\n")).toContain("set rpm_filter_weights = 100,0,80");
+    // a harmonic that leaks in the filtered gyro is never dimmed
+    const leaking = runRules({ ...m, spectral: [spectral("roll", [], { harmonicRatios: [1.2, 1.1, 5] })] }, "freestyle");
+    expect(leaking.recommendations.find((r) => r.findingId === "rpm-weights")?.cliLines?.join("\n")).toContain("100,0,100");
+    // a 1 kHz log cannot judge the folded harmonics → no weights advice
+    expect(runRules({ ...m, sampleRateHz: 1000 }, "freestyle").recommendations.find((r) => r.findingId === "rpm-weights")).toBeUndefined();
+  });
+
+  it("offers a higher dynamic idle when the idle line sits below the RPM filter floor", () => {
+    const m = baseMetrics({
+      spectral: [spectral("roll", [peak({ kind: "motorIdle", freqHz: 42, ratioToFloor: 12 })])],
+      flownConfig: { filters: {} as never, pids: null, advanced: { idleMinRpm: 25 } },
+    });
+    const out = runRules(m, "freestyle");
+    const rec = out.recommendations.find((r) => r.findingId === "motor-idle");
+    expect(rec!.changes.advanced?.idleMinRpm).toBe(35); // 25 → 60 (= 100 Hz × 60 / 100)
+    expect(rec!.cliLines?.join("\n")).toContain("set dyn_idle_min_rpm = 60");
   });
 
   it("gives no recommendations for a log that is too short or has no gyro data", () => {
@@ -230,32 +293,63 @@ describe("runRules", () => {
     expect(recLow!.changes.filters?.dtermLowpassDynMaxHz).toBeUndefined();
   });
 
-  it("raises D first on under-damped axes, cuts P when D/P is already high", () => {
+  it("fixes the P:D ratio on under-damped axes: P and I down (Rosser), D up only when D is abnormally low", () => {
     const m = baseMetrics({
       stepResponse: [step("roll", { overshootPercent: 40, ringingCycles: 2 })],
     });
-    // default D/P = 30/45 = 0.67 → raise D
+    // BF 4.5 default D/P = 40/45 ≈ 0.89 → one tracking step down (P and I −10 %)
     const out = runRules(m, "freestyle");
     const rec = out.recommendations.find((r) => r.findingId === "overshoot-roll");
-    expect(rec!.changes.pids?.roll?.d).toBe(3);
-    expect(rec!.changes.pids?.roll?.p).toBeUndefined();
+    expect(rec!.changes.pids?.roll?.p).toBe(-5); // round(45 × 0.1)
+    expect(rec!.changes.pids?.roll?.i).toBe(-8); // round(80 × 0.1)
+    expect(rec!.changes.pids?.roll?.d).toBeUndefined();
 
-    // base with D/P = 40/45 ≈ 0.89 → cut P
-    const base: ProfileSettings = { pids: { roll: { p: 45, d: 40 } } };
+    // D/P = 20/45 ≈ 0.44 → damping is missing → raise D
+    const base: ProfileSettings = { pids: { roll: { p: 45, i: 80, d: 20 } } };
     const out2 = runRules(m, "freestyle", base);
     const rec2 = out2.recommendations.find((r) => r.findingId === "overshoot-roll");
-    expect(rec2!.changes.pids?.roll?.p).toBe(-3);
-    expect(rec2!.changes.pids?.roll?.d).toBeUndefined();
+    expect(rec2!.changes.pids?.roll?.d).toBe(2);
+    expect(rec2!.changes.pids?.roll?.p).toBeUndefined();
   });
 
-  it("tunes feedforward from start lag and end overshoot", () => {
+  it("reads a slow, drawn-out overshoot as too much I-term (Brian White)", () => {
     const m = baseMetrics({
-      stepResponse: [step("pitch", { ffStartLagMs: 25 })],
+      stepResponse: [step("pitch", { overshootPercent: 30, ringingCycles: 2, riseTimeMs: 15, peakTimeMs: 120 })],
     });
     const out = runRules(m, "freestyle");
-    const lag = out.recommendations.find((r) => r.findingId === "ff-lag-pitch");
+    expect(out.recommendations.find((r) => r.findingId === "overshoot-pitch")).toBeUndefined();
+    const rec = out.recommendations.find((r) => r.findingId === "iterm-high-pitch");
+    expect(rec!.changes.pids?.pitch?.i).toBe(-8); // round(84 × 0.1)
+    // a sharp overshoot (peak right after the rise) stays a P:D problem
+    const sharp = runRules(baseMetrics({ stepResponse: [step("pitch", { overshootPercent: 30, ringingCycles: 2, riseTimeMs: 15, peakTimeMs: 25 })] }), "freestyle");
+    expect(sharp.recommendations.find((r) => r.findingId === "overshoot-pitch")).toBeDefined();
+  });
+
+  it("raises P and I together on an over-damped axis", () => {
+    const out = runRules(baseMetrics({ stepResponse: [step("roll", { riseTimeMs: 70, overshootPercent: 2 })] }), "freestyle");
+    const rec = out.recommendations.find((r) => r.findingId === "slow-roll");
+    expect(rec!.changes.pids?.roll?.p).toBe(5);
+    expect(rec!.changes.pids?.roll?.i).toBe(8);
+  });
+
+  it("tunes feedforward from start lag: more FF when the lag persists, FF boost when the gyro catches up", () => {
+    // lag through the whole move (steady-state error stays) → more FF
+    const persistent = runRules(baseMetrics({ stepResponse: [step("pitch", { ffStartLagMs: 25, steadyStateErrorPercent: 8 })] }), "freestyle");
+    const lag = persistent.recommendations.find((r) => r.findingId === "ff-lag-pitch");
     expect(lag!.changes.advanced?.feedforwardPitch).toBe(10);
     expect(lag!.cliLines?.join("\n")).toContain("set f_pitch = 135"); // default 125 + 10
+    // start-only lag → boost, not FF (Rosser)
+    const startOnly = runRules(baseMetrics({ stepResponse: [step("pitch", { ffStartLagMs: 25, steadyStateErrorPercent: 2 })] }), "freestyle");
+    const boost = startOnly.recommendations.find((r) => r.findingId === "ff-lag-pitch");
+    expect(boost!.changes.advanced?.feedforwardBoost).toBe(3);
+    expect(boost!.changes.advanced?.feedforwardPitch).toBeUndefined();
+    // a tune without FF gets FF 50 as its first step (the FF A/B pair)
+    const noFf = runRules(
+      baseMetrics({ stepResponse: [step("pitch", { ffStartLagMs: 25, steadyStateErrorPercent: 8 })] }),
+      "freestyle",
+      { advanced: { feedforwardPitch: 0 } },
+    );
+    expect(noFf.recommendations.find((r) => r.findingId === "ff-lag-pitch")!.changes.advanced?.feedforwardPitch).toBe(50);
   });
 
   it("does not co-fire an FF cut on an axis already flagged under-damped", () => {
@@ -286,7 +380,7 @@ describe("runRules", () => {
     });
     const out = runRules(m, "freestyle");
     const rec = out.recommendations.find((r) => r.findingId === "iterm-roll");
-    expect(rec!.changes.pids?.roll?.i).toBe(5);
+    expect(rec!.changes.pids?.roll?.i).toBe(8); // +10 % of the default 80
   });
 
   it("flags high-throttle-only noise as a TPA candidate", () => {
@@ -298,8 +392,37 @@ describe("runRules", () => {
     const out = runRules(m, "freestyle");
     const tpa = out.recommendations.find((r) => r.findingId === "tpa-hint");
     expect(tpa).toBeDefined();
-    expect(tpa!.changes.advanced?.tpaRate).toBe(-5);
-    expect(tpa!.cliLines?.join("\n")).toContain("set tpa_rate = 60"); // default 65 - 5
+    // tpa_rate is the attenuation at full throttle: MORE attenuation = higher value
+    expect(tpa!.changes.advanced?.tpaRate).toBe(5);
+    expect(tpa!.cliLines?.join("\n")).toContain("set tpa_rate = 70"); // default 65 + 5
+    // with throttle bands the breakpoint moves just below the noisy band
+    const banded = runRules({ ...m, throttleBands: { lowMaxUs: 1150, highMinUs: 1520 } }, "freestyle", { advanced: { tpaRate: 40, tpaBreakpoint: 1600 } });
+    const rec = banded.recommendations.find((r) => r.findingId === "tpa-hint");
+    expect(rec!.cliLines?.join("\n")).toContain("set tpa_breakpoint = 1470");
+    expect(rec!.cliLines?.join("\n")).toContain("set tpa_rate = 45");
+  });
+
+  it("flags the header-only settings Rosser calls out", () => {
+    const m = baseMetrics({
+      flownConfig: { filters: {} as never, pids: null, advanced: { dMaxAdvance: 20 } },
+      flownExtras: { pidsumLimit: 500, pidsumLimitYaw: 400, rcSmoothingAutoFactor: 30, absControlGain: 5 },
+    });
+    const out = runRules(m, "freestyle");
+    const adv = out.recommendations.find((r) => r.findingId === "dmax-advance");
+    expect(adv!.cliLines?.join("\n")).toContain("set d_max_advance = 0");
+    expect(out.recommendations.find((r) => r.findingId === "pidsum-limit")?.cliLines).toContain("set pidsum_limit = 1000");
+    expect(out.recommendations.find((r) => r.findingId === "rc-smoothing")?.cliLines).toContain("set rc_smoothing_auto_factor = 50");
+    expect(out.findings.some((f) => f.id === "abs-control")).toBe(true);
+    // racing at 30 is close enough to its 25 target, and precision has no Rosser number → no smoothing finding
+    expect(runRules(m, "racing").findings.some((f) => f.id === "rc-smoothing")).toBe(false);
+    expect(runRules(m, "precision").findings.some((f) => f.id === "rc-smoothing")).toBe(false);
+  });
+
+  it("points at the crisp A/B when the D-term is quiet everywhere", () => {
+    const quiet = runRules(baseMetrics({ dtermRms: { roll: 30, pitch: 30, yaw: 20 }, dtermRmsLowThrottle: { roll: 30, pitch: 30, yaw: 20 }, dtermRmsHighThrottle: { roll: 40, pitch: 35, yaw: 20 } }), "freestyle");
+    expect(quiet.findings.some((f) => f.id === "dterm-headroom")).toBe(true);
+    const busy = baseMetrics({ dtermRms: { roll: 90, pitch: 90, yaw: 60 }, dtermRmsLowThrottle: { roll: 70, pitch: 70, yaw: 50 }, dtermRmsHighThrottle: { roll: 90, pitch: 90, yaw: 60 } });
+    expect(runRules(busy, "freestyle").findings.some((f) => f.id === "dterm-headroom")).toBe(false);
   });
 
   it("legacy path (no spectral) still targets notches but never below 100 Hz", () => {

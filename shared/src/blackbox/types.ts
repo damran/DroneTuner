@@ -7,9 +7,23 @@ export interface FieldDef {
   encoding: number[];
 }
 
+/** Byte range of one flight session inside a (possibly multi-session) blackbox file. */
+export interface BlackboxSessionRange {
+  /** 0-based session index in file order */
+  index: number;
+  /** byte offset of the session's "H Product:" marker */
+  start: number;
+  /** byte offset where the next session starts (or the file ends) */
+  end: number;
+}
+
 export interface ParsedLog {
   /** raw header name → value (all "H name:value" lines) */
   headers: Record<string, string>;
+  /** which session of the file this is (0-based) */
+  sessionIndex: number;
+  /** how many sessions the file contains (a flash download holds one per arm) */
+  sessionCount: number;
   frameCount: number;
   /** frame timestamps in µs */
   timeUs: Float32Array;
@@ -36,4 +50,10 @@ export class BlackboxParseError extends Error {
 export interface ParseOptions {
   /** stop after this many main frames (default 1_000_000) */
   maxFrames?: number;
+  /**
+   * Which flight session to parse when the file holds several (a blackbox
+   * flash download contains one session per arm, each starting with its own
+   * "H Product:" header). Defaults to the first session.
+   */
+  sessionIndex?: number;
 }

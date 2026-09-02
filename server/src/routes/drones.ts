@@ -1,8 +1,9 @@
 import type { FastifyInstance } from "fastify";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Component, Drone, DroneDetail, DroneSummary, Profile } from "@dronetuner/shared";
 import type { AppContext } from "../context";
+import { toLog } from "./logs";
 import {
   components,
   droneComponents,
@@ -17,6 +18,7 @@ const createSchema = z.object({
   name: z.string().min(1),
   sizeClass: z.string().optional().default(""),
   notes: z.string().nullable().optional(),
+  videoSystem: z.enum(["analog", "hd"]).nullable().optional(),
 });
 
 const updateSchema = z.object({
@@ -27,6 +29,7 @@ const updateSchema = z.object({
   fcBoard: z.string().nullable().optional(),
   fcCraftName: z.string().nullable().optional(),
   fcUid: z.string().nullable().optional(),
+  videoSystem: z.enum(["analog", "hd"]).nullable().optional(),
 });
 
 const addComponentSchema = z.object({
@@ -45,6 +48,7 @@ function toDrone(row: typeof drones.$inferSelect): Drone {
     fcBoard: row.fcBoard,
     fcCraftName: row.fcCraftName,
     fcUid: row.fcUid,
+    videoSystem: row.videoSystem,
   };
 }
 
@@ -55,6 +59,8 @@ function toProfile(row: typeof profiles.$inferSelect): Profile {
     name: row.name,
     goal: row.goal,
     sizeClass: row.sizeClass,
+    videoSystem: row.videoSystem,
+    notes: row.notes,
     settings: (row.settingsJson ?? {}) as Profile["settings"],
     source: row.source as Profile["source"],
     createdAt: row.createdAt,
@@ -116,7 +122,11 @@ export default async function dronesRoutes(app: FastifyInstance, opts: { ctx: Ap
       db.select().from(dronePhotos).where(eq(dronePhotos.droneId, id)),
       db.select().from(profiles).where(eq(profiles.droneId, id)).orderBy(desc(profiles.createdAt)),
       db.select().from(flights).where(eq(flights.droneId, id)).orderBy(desc(flights.date)),
-      db.select().from(logs).where(eq(logs.droneId, id)).orderBy(desc(logs.uploadedAt)),
+      db
+        .select()
+        .from(logs)
+        .where(eq(logs.droneId, id))
+        .orderBy(desc(sql`coalesce(${logs.recordedAt}, ${logs.uploadedAt})`), desc(logs.sessionIndex), desc(logs.id)),
     ]);
 
     const detail: DroneDetail = {
@@ -133,13 +143,7 @@ export default async function dronesRoutes(app: FastifyInstance, opts: { ctx: Ap
         durationS: f.durationS,
         styleTag: f.styleTag,
       })),
-      logs: logRows.map((l) => ({
-        id: l.id,
-        droneId: l.droneId,
-        filePath: l.filePath,
-        headers: (l.headersJson ?? null) as Record<string, string> | null,
-        uploadedAt: l.uploadedAt,
-      })),
+      logs: logRows.map(toLog),
     };
 
     for (const link of links) {
@@ -161,7 +165,13 @@ export default async function dronesRoutes(app: FastifyInstance, opts: { ctx: Ap
     const body = createSchema.parse(req.body);
     const [row] = await db
       .insert(drones)
-      .values({ name: body.name, sizeClass: body.sizeClass, notes: body.notes ?? null, createdAt: Date.now() })
+      .values({
+        name: body.name,
+        sizeClass: body.sizeClass,
+        notes: body.notes ?? null,
+        videoSystem: body.videoSystem ?? null,
+        createdAt: Date.now(),
+      })
       .returning();
     return toDrone(row!);
   });
@@ -181,6 +191,7 @@ export default async function dronesRoutes(app: FastifyInstance, opts: { ctx: Ap
         fcBoard: body.fcBoard !== undefined ? body.fcBoard : existing.fcBoard,
         fcCraftName: body.fcCraftName !== undefined ? body.fcCraftName : existing.fcCraftName,
         fcUid: body.fcUid !== undefined ? body.fcUid : existing.fcUid,
+        videoSystem: body.videoSystem !== undefined ? body.videoSystem : existing.videoSystem,
       })
       .where(eq(drones.id, id))
       .returning();

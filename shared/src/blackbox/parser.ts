@@ -13,7 +13,7 @@ import {
   readTag8_8SVB,
 } from "./decoders";
 import { signExtend14Bit } from "./stream";
-import { BlackboxParseError, FieldDef, ParsedLog, ParseOptions } from "./types";
+import { BlackboxParseError, BlackboxSessionRange, FieldDef, ParsedLog, ParseOptions } from "./types";
 
 // Predictors
 const P_0 = 0;
@@ -54,6 +54,31 @@ const EV_TWITCH_TEST = 40;
 const EV_LOG_END = 255;
 
 const END_OF_LOG_MESSAGE = "End of log\0";
+const SESSION_MARKER = "H Product:";
+
+/**
+ * Locate every flight session in a blackbox file. Betaflight writes a fresh
+ * header block (starting with "H Product:") on every arm, so a file
+ * downloaded from flash holds one session per flight, back to back. Each
+ * range runs from its marker to the next marker (or the end of the file).
+ */
+export function listBlackboxSessions(data: Uint8Array): BlackboxSessionRange[] {
+  const stream = new ByteStream(data);
+  const starts: number[] = [];
+  let pos = 0;
+  for (;;) {
+    stream.pos = pos;
+    const off = stream.nextOffsetOf(SESSION_MARKER);
+    if (off === -1) break;
+    starts.push(off);
+    pos = off + SESSION_MARKER.length;
+  }
+  return starts.map((start, i) => ({
+    index: i,
+    start,
+    end: i + 1 < starts.length ? starts[i + 1]! : data.length,
+  }));
+}
 
 class GrowableF32 {
   private arr = new Float32Array(4096);
@@ -103,28 +128,39 @@ export class BlackboxParser {
   private warnedMessages = new Set<string>();
   private truncated = false;
 
+  private sessionIndex = 0;
+  private sessionCount = 0;
+
   constructor(data: Uint8Array, opts: ParseOptions = {}) {
     this.stream = new ByteStream(data);
     this.opts = opts;
   }
 
-  /** Parse only the header section (cheap; used on upload to store metadata). */
-  parseHeadersOnly(): Record<string, string> {
-    const markerOffset = this.stream.nextOffsetOf("H Product:");
-    if (markerOffset === -1) {
+  /**
+   * Confine the stream to the requested session (default: the first). A
+   * session's data ends where the next session's header begins, so frames
+   * from a later flight can never bleed into this one.
+   */
+  private selectSession(): void {
+    const sessions = listBlackboxSessions(this.stream.data);
+    if (sessions.length === 0) {
       throw new BlackboxParseError("Not a blackbox log (missing 'H Product:' header)", 0);
     }
-    this.stream.pos = markerOffset;
-    this.parseHeader();
-    return this.headers;
+    const index = this.opts.sessionIndex ?? 0;
+    const session = sessions[index];
+    if (!session) {
+      throw new BlackboxParseError(
+        `Session ${index + 1} requested but the file only holds ${sessions.length}`,
+        0,
+      );
+    }
+    this.sessionIndex = index;
+    this.sessionCount = sessions.length;
+    this.stream = new ByteStream(this.stream.data, session.start, session.end);
   }
 
   parse(): ParsedLog {
-    const markerOffset = this.stream.nextOffsetOf("H Product:");
-    if (markerOffset === -1) {
-      throw new BlackboxParseError("Not a blackbox log (missing 'H Product:' header)", 0);
-    }
-    this.stream.pos = markerOffset;
+    this.selectSession();
 
     this.parseHeader();
     this.extractSysConfig();
@@ -150,14 +186,19 @@ export class BlackboxParser {
       channels[name] = arr.toArray();
     }
 
-    // Detect additional sessions we ignored
-    const rest = this.stream.nextOffsetOf("H Product:");
-    if (rest !== -1) {
-      this.warnings.push("Log contains multiple sessions; only the first was parsed.");
+    // A multi-session file parsed without an explicit session choice is
+    // almost always a mistake (the first session is often a 2 s arm/disarm
+    // blip), so say so loudly.
+    if (this.sessionCount > 1 && this.opts.sessionIndex === undefined) {
+      this.warnings.push(
+        `Log contains ${this.sessionCount} flight sessions; only the first was parsed. Pass sessionIndex to pick another.`,
+      );
     }
 
     return {
       headers: this.headers,
+      sessionIndex: this.sessionIndex,
+      sessionCount: this.sessionCount,
       frameCount: this.frameCount,
       timeUs: this.timeUs.toArray(),
       channels,
@@ -629,8 +670,4 @@ export class BlackboxParser {
 
 export function parseBlackboxLog(data: Uint8Array, opts: ParseOptions = {}): ParsedLog {
   return new BlackboxParser(data, opts).parse();
-}
-
-export function parseBlackboxHeaders(data: Uint8Array): Record<string, string> {
-  return new BlackboxParser(data).parseHeadersOnly();
 }

@@ -158,6 +158,8 @@ const DTERM_VERY_NOISY = 250;
 /** Minimum dynamic-notch hunt frequency — below ~100 Hz the notch adds nasty
  * delay in the PID-relevant band (Rosser / BF docs). */
 const DYN_NOTCH_MIN_FLOOR_HZ = 100;
+/** Below this much flight the spectra/step statistics are noise, not evidence. */
+const MIN_LOG_S = 10;
 
 interface Resonance {
   freqHz: number;
@@ -205,6 +207,79 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
 
   const baseFilters = effectiveBase.filters!;
   const rpmActive = metrics.rpmFilterActive;
+
+  // ------------------------------------------------------------------
+  // 0. Enough data? A 2 s arm/disarm blip has a zero noise floor and no
+  //    steps — every rule below would "see" a quiet frame and a perfect tune.
+  // ------------------------------------------------------------------
+  const hasGyroData = AXES.some((a) => metrics.noiseFloor[a] > 0) || AXES.some((a) => metrics.dtermRms[a] > 0);
+  if (metrics.durationS < MIN_LOG_S || !hasGyroData) {
+    findings.push({
+      id: "short-log",
+      severity: "info",
+      title:
+        metrics.durationS < MIN_LOG_S
+          ? `Log too short for tuning advice (${metrics.durationS.toFixed(1)} s)`
+          : "No gyro activity in this log",
+      detail: `Recommendations need at least ${MIN_LOG_S} s of flight with the quad airborne (hover, some stick moves, a few throttle changes). Pick a longer flight session or record a new log.`,
+    });
+    return { findings, recommendations };
+  }
+
+  // Loop-rate sanity: an 8 kHz gyro with pid_process_denom 4 runs the PID
+  // loop at 2 kHz — the Nyquist limit drops to 1 kHz, filters see less
+  // headroom and every filter stage adds proportionally more delay.
+  const gyroRateHz = metrics.gyroRateHz ?? null;
+  const pidLoopRateHz = metrics.pidLoopRateHz ?? null;
+  if (gyroRateHz && pidLoopRateHz && pidLoopRateHz <= 2000 && gyroRateHz >= 2 * pidLoopRateHz) {
+    findings.push({
+      id: "pid-loop-rate",
+      severity: "info",
+      title: `PID loop runs at ${pidLoopRateHz} Hz (gyro ${gyroRateHz} Hz)`,
+      detail:
+        "pid_process_denom 4 halves the control bandwidth for no delay benefit on a G4/F4/F7 board. Whoop and micro targets run pid_process_denom 2 (4 kHz PID) comfortably; set it in the CLI (not MSP-writable here) and re-log.",
+    });
+  }
+
+  // Dynamic-notch floor sanity (the flown value, not the template): a notch
+  // hunting below 100 Hz sits inside the control band of a small quad.
+  const flownNotchMin = flown?.filters?.dynNotchMinHz;
+  const flownNotchCount = flown?.filters?.dynNotchCount ?? 1;
+  if (flownNotchMin !== undefined && flownNotchCount > 0 && flownNotchMin < DYN_NOTCH_MIN_FLOOR_HZ) {
+    const baseMin = baseFilters.dynNotchMinHz ?? flownNotchMin;
+    add(
+      {
+        id: "notch-floor",
+        severity: "warning",
+        title: `Dynamic notch floor at ${flownNotchMin} Hz is inside the control band`,
+        detail: `Betaflight's own presets never go below 80 Hz and every whoop/micro tune uses 100-150 Hz. A notch that hunts into the 60-90 Hz band removes real control signal and can start a low-frequency oscillation (this fleet crashed at 60 Hz / Q 300). Fix frame resonances below 100 Hz mechanically (props, CG, motor screws) and with D-term filtering instead.`,
+      },
+      baseMin < DYN_NOTCH_MIN_FLOOR_HZ ? { filters: { dynNotchMinHz: DYN_NOTCH_MIN_FLOOR_HZ - baseMin } } : undefined,
+      baseMin < DYN_NOTCH_MIN_FLOOR_HZ ? `Raise dyn_notch_min_hz to ${DYN_NOTCH_MIN_FLOOR_HZ} Hz.` : undefined,
+      0.95,
+    );
+  }
+
+  // Idle-speed motor noise: dynamic idle parks the motors at a fixed RPM, so
+  // its fundamental shows up as a "fixed" peak. It is the RPM filter's job
+  // (or simply accepted) — never the dynamic notch's.
+  const idlePeaks = (metrics.spectral ?? [])
+    .flatMap((sp) => sp.peaks.map((pk) => ({ axis: sp.axis, ...pk })))
+    .filter((pk) => pk.kind === "motorIdle" && pk.ratioToFloor > 4);
+  if (idlePeaks.length > 0) {
+    const strongest = idlePeaks.reduce((a, b) => (a.ratioToFloor > b.ratioToFloor ? a : b));
+    const rpmMin = baseFilters.rpmFilterMinHz ?? 100;
+    findings.push({
+      id: "motor-idle",
+      severity: "info",
+      title: `Idle-speed motor noise at ${Math.round(strongest.freqHz)} Hz`,
+      detail: `A fixed peak at the motors' idle speed (${strongest.ratioToFloor.toFixed(1)}× the floor on ${AXIS_LABEL[strongest.axis]}). ${
+        strongest.freqHz < rpmMin
+          ? `It sits below rpm_filter_min_hz (${rpmMin} Hz) where the RPM notches are faded out — either lower rpm_filter_min_hz toward it (more delay at low throttle) or accept it; it disappears as soon as the throttle rises.`
+          : "The RPM filter should cover it — check motor_poles and that bidirectional DShot reports RPM on all motors."
+      } Do not widen the dynamic notch to chase it.`,
+    });
+  }
 
   // ------------------------------------------------------------------
   // 1. Noise sources: frame resonances (fixed frequency) vs motor harmonics
@@ -286,19 +361,20 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
         0.9,
       );
     }
-  } else if (rpmActive && (baseFilters.dynNotchCount ?? 3) > 0) {
-    // Quiet frame + RPM filter: the dynamic notch is idle — disable it and
-    // save ~1 ms of delay (Rosser / BF DShot RPM filtering docs).
+  } else if (rpmActive && (baseFilters.dynNotchCount ?? 3) > 1) {
+    // Quiet frame + RPM filter: extra notches are idle — keep ONE as insurance
+    // (every whoop/micro vendor tune ships one) and drop the rest, ~0.5 ms
+    // of delay each (Rosser / BF DShot RPM filtering docs).
     add(
       {
         id: "quiet-frame",
         severity: "info",
-        title: "No frame resonance — dynamic notch can be disabled",
+        title: "No frame resonance — one dynamic notch is enough",
         detail:
-          "With RPM filtering active and no fixed-frequency resonance stripes, the dynamic notch only adds delay (~1 ms) without benefit.",
+          "With RPM filtering active and no fixed-frequency resonance stripes, additional dynamic notches only add delay without benefit. One notch stays as insurance against a resonance that appears with a new frame, props or a knock.",
       },
-      { filters: { dynNotchCount: -(baseFilters.dynNotchCount ?? 3) } },
-      "Disable the dynamic notch on this quiet frame to save filter delay. Re-check after the next flight — if a resonance stripe appears, re-enable it.",
+      { filters: { dynNotchCount: 1 - (baseFilters.dynNotchCount ?? 3) } },
+      "Run a single dynamic notch on this quiet frame to save filter delay. Re-check after the next flight.",
       0.7,
     );
   } else if (!rpmActive) {
@@ -349,20 +425,21 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
       }
     }
 
-    // Q: tighter notches = less delay. Official guidance: up to ~750 safely,
-    // ~1000 on clean builds with verification.
+    // Motor harmonics visible in the FILTERED gyro mean the RPM notches are
+    // too narrow (or the pole count is wrong) — widen them; never tighten.
     const baseQ = baseFilters.rpmFilterQ ?? 500;
-    if (baseQ < 750) {
+    const strongestMotor = motorPeaks.reduce((a, b) => (a.ratioToFloor > b.ratioToFloor ? a : b));
+    if (baseQ > 300) {
       add(
         {
           id: "rpm-q",
-          severity: "info",
-          title: "RPM filter Q can be tightened",
-          detail: `Q ${baseQ} → 750 makes the RPM notches narrower, reducing delay. Verify in the next log that motor noise is still fully notched; clean builds can push toward 1000.`,
+          severity: strongestMotor.ratioToFloor > 8 ? "warning" : "info",
+          title: `Motor noise leaks past the RPM notches (${Math.round(strongestMotor.freqHz)} Hz, ${strongestMotor.ratioToFloor.toFixed(1)}× floor)`,
+          detail: `Throttle-tracking peaks in the filtered gyro mean the RPM notches (Q ${baseQ}) are narrower than the motor noise. Widen them (lower Q) in 100 steps, and double-check motor_poles (12 for 07xx/08xx/11xx whoop motors, 14 for 1103-1404) — a wrong pole count puts every notch at the wrong frequency.`,
         },
-        { filters: { rpmFilterQ: 750 - baseQ } },
-        "Tighter RPM notches for less delay (CLI-only on BF 4.4/4.5). Back off if motor noise leaks through into the filtered gyro.",
-        0.5,
+        { filters: { rpmFilterQ: -Math.min(100, baseQ - 300) } },
+        "Wider RPM notches so the motor harmonics are actually removed (CLI-only on BF 4.4/4.5). Tighten again later only if the filtered gyro stays clean.",
+        0.6,
       );
     }
 
@@ -389,6 +466,21 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
     }
   }
 
+  if (rpmActive && motorPeaks.length === 0 && (baseFilters.rpmFilterQ ?? 500) < 750 && metrics.spectral) {
+    const baseQ = baseFilters.rpmFilterQ ?? 500;
+    add(
+      {
+        id: "rpm-q-tighten",
+        severity: "info",
+        title: "RPM notches could be narrower",
+        detail: `No motor harmonics leak into the filtered gyro, so Q ${baseQ} → 750 would trim delay. Optional: verify in the next log that motor noise stays fully notched (clean builds go toward 1000).`,
+      },
+      { filters: { rpmFilterQ: 750 - baseQ } },
+      "Tighter RPM notches for less delay (CLI-only on BF 4.4/4.5). Back off if motor noise appears in the filtered gyro.",
+      0.3,
+    );
+  }
+
   // ------------------------------------------------------------------
   // 3. Gyro LPF2 anti-aliasing (Rosser: push to 1 kHz, or disable when the
   //    gyro rate equals the PID loop rate)
@@ -397,7 +489,9 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
   const pidRate = metrics.pidLoopRateHz ?? null;
   const baseLpf2 = baseFilters.gyroLowpass2Hz ?? 500;
   if (gyroRate && pidRate) {
-    if (gyroRate > pidRate * 1.05 && baseLpf2 !== 1000) {
+    // 1000 Hz only makes sense when the PID loop's Nyquist limit is above it
+    // (4 kHz loops and up). At 2 kHz the loop cannot even represent 1 kHz.
+    if (gyroRate > pidRate * 1.05 && pidRate >= 4000 && baseLpf2 !== 1000 && baseLpf2 !== 0) {
       add(
         {
           id: "gyro-lpf2",
@@ -409,13 +503,13 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
         "Gyro LPF2 at 1000 Hz still anti-aliases but adds far less delay.",
         0.6,
       );
-    } else if (Math.abs(gyroRate - pidRate) <= pidRate * 0.05 && baseLpf2 > 0) {
+    } else if (rpmActive && Math.abs(gyroRate - pidRate) <= pidRate * 0.05 && baseLpf2 > 0) {
       add(
         {
           id: "gyro-lpf2",
           severity: "info",
           title: "Gyro LPF2 can be disabled (gyro rate = PID rate)",
-          detail: `Gyro and PID loop both run at ${gyroRate} Hz — no aliasing can occur, so the anti-aliasing filter is pure delay.`,
+          detail: `Gyro and PID loop both run at ${gyroRate} Hz — no aliasing can occur, so the anti-aliasing filter is pure delay. Safe here because the RPM filter handles motor noise; without RPM filtering LPF2 would stay as the only motor-noise low-pass.`,
         },
         { filters: { gyroLowpass2Hz: -baseLpf2 } },
         "Disable gyro LPF2 when the gyro rate equals the PID loop rate.",
@@ -663,8 +757,10 @@ export function runRules(metrics: LogMetrics, goal: string, base?: ProfileSettin
   // Goal weighting
   // ------------------------------------------------------------------
   const weights: Record<string, Record<string, number>> = {
-    race: { overshoot: 1, slow: 1, "ff-": 0.9, dterm: 0.8, resonance: 0.7, "motor-sat": 1 },
+    racing: { overshoot: 1, slow: 1, "ff-": 0.9, dterm: 0.8, resonance: 0.7, "motor-sat": 1 },
     freestyle: { overshoot: 0.8, slow: 0.7, "ff-": 0.8, dterm: 1, resonance: 0.9, "motor-sat": 0.8 },
+    // Indoor precision: a quiet hover and clean step response matter more than snap.
+    precision: { overshoot: 1, slow: 0.6, "ff-": 0.5, dterm: 1, resonance: 1, "motor-sat": 0.7 },
     cinematic: { overshoot: 0.6, slow: 0.5, "ff-": 0.6, dterm: 1, resonance: 1, "motor-sat": 0.6 },
   };
   const w = weights[goal] ?? weights.freestyle!;

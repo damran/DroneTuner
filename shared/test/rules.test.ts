@@ -102,12 +102,77 @@ describe("runRules", () => {
     expect(rpm!.changes.filters?.rpmFilterMinHz).toBe(25);
   });
 
-  it("recommends disabling the dynamic notch on quiet frames with RPM filtering", () => {
+  it("keeps a single dynamic notch on quiet frames with RPM filtering", () => {
     const out = runRules(baseMetrics(), "freestyle");
     const rec = out.recommendations.find((r) => r.findingId === "quiet-frame");
     expect(rec).toBeDefined();
-    expect(rec!.changes.filters?.dynNotchCount).toBe(-3);
-    expect(rec!.cliLines?.join("\n")).toContain("set dyn_notch_count = 0");
+    expect(rec!.changes.filters?.dynNotchCount).toBe(-2); // BF default 3 → 1
+    expect(rec!.cliLines?.join("\n")).toContain("set dyn_notch_count = 1");
+    // already at one notch → nothing to trim
+    const one = runRules(baseMetrics(), "freestyle", { filters: { dynNotchCount: 1 } });
+    expect(one.recommendations.find((r) => r.findingId === "quiet-frame")).toBeUndefined();
+  });
+
+  it("gives no recommendations for a log that is too short or has no gyro data", () => {
+    const short = runRules(baseMetrics({ durationS: 1.8 }), "freestyle");
+    expect(short.recommendations).toEqual([]);
+    expect(short.findings.map((f) => f.id)).toEqual(["short-log"]);
+    const empty = runRules(baseMetrics({ noiseFloor: { roll: 0, pitch: 0, yaw: 0 }, dtermRms: { roll: 0, pitch: 0, yaw: 0 } }), "freestyle");
+    expect(empty.recommendations).toEqual([]);
+    expect(empty.findings[0]?.id).toBe("short-log");
+  });
+
+  it("does not push gyro LPF2 to 1000 Hz on a 2 kHz PID loop and flags the loop rate", () => {
+    const out = runRules(baseMetrics({ gyroRateHz: 8000, pidLoopRateHz: 2000 }), "freestyle");
+    expect(out.recommendations.find((r) => r.findingId === "gyro-lpf2")).toBeUndefined();
+    expect(out.findings.find((f) => f.id === "pid-loop-rate")).toBeDefined();
+    const fast = runRules(baseMetrics({ gyroRateHz: 8000, pidLoopRateHz: 4000 }), "freestyle");
+    expect(fast.findings.find((f) => f.id === "pid-loop-rate")).toBeUndefined();
+  });
+
+  it("warns when the flown dynamic notch floor is below 100 Hz and raises it", () => {
+    const flown = {
+      filters: { ...runRules(baseMetrics(), "freestyle") && {} } as never,
+    };
+    void flown;
+    const m = baseMetrics({
+      flownConfig: {
+        filters: { dynNotchMinHz: 80, dynNotchCount: 2 } as never,
+        pids: null,
+        advanced: null,
+      },
+    });
+    const out = runRules(m, "precision");
+    const f = out.findings.find((x) => x.id === "notch-floor");
+    expect(f?.severity).toBe("warning");
+    const rec = out.recommendations.find((r) => r.findingId === "notch-floor");
+    expect(rec?.changes.filters?.dynNotchMinHz).toBe(20); // 80 → 100
+    expect(rec?.cliLines?.join("\n")).toContain("set dyn_notch_min_hz = 100");
+  });
+
+  it("widens the RPM notches when motor harmonics leak into the filtered gyro", () => {
+    const m = baseMetrics({
+      spectral: [spectral("roll", [peak({ kind: "motorHarmonic", freqHz: 320, ratioToFloor: 9, onsetHz: 140, strongHz: 200 })], { motorNoiseOnsetHz: 140, motorNoiseStrongHz: 200 })],
+    });
+    const out = runRules(m, "freestyle");
+    const q = out.recommendations.find((r) => r.findingId === "rpm-q");
+    expect(q).toBeDefined();
+    expect(q!.changes.filters?.rpmFilterQ).toBe(-100); // 500 → 400
+    expect(out.recommendations.find((r) => r.findingId === "rpm-q-tighten")).toBeUndefined();
+    // and the optional tightening only appears on a clean spectrum
+    const clean = runRules(baseMetrics({ spectral: [spectral("roll", [])] }), "freestyle");
+    expect(clean.recommendations.find((r) => r.findingId === "rpm-q-tighten")?.changes.filters?.rpmFilterQ).toBe(250);
+  });
+
+  it("treats idle-speed motor peaks as motor noise, never as a notch target", () => {
+    const m = baseMetrics({
+      spectral: [spectral("roll", [peak({ kind: "motorIdle", freqHz: 44, ratioToFloor: 12 })])],
+    });
+    const out = runRules(m, "freestyle");
+    expect(out.recommendations.find((r) => r.findingId === "resonance-notch")).toBeUndefined();
+    const f = out.findings.find((x) => x.id === "motor-idle");
+    expect(f).toBeDefined();
+    expect(f!.detail).toContain("rpm_filter_min_hz");
   });
 
   it("does NOT recommend disabling the notch without RPM filtering", () => {
@@ -130,6 +195,13 @@ describe("runRules", () => {
     expect(rec).toBeDefined();
     expect(rec!.changes.filters?.gyroLowpass2Hz).toBe(-500);
     expect(rec!.cliLines?.join("\n")).toContain("set gyro_lpf2_static_hz = 0");
+  });
+
+  it("keeps gyro LPF2 when the RPM filter is off, even with gyro rate = PID rate", () => {
+    // Without RPM filtering LPF2 is the only motor-noise low-pass — the
+    // anti-aliasing argument alone must not remove it.
+    const out = runRules(baseMetrics({ gyroRateHz: 8000, pidLoopRateHz: 8000, rpmFilterActive: false }), "freestyle");
+    expect(out.recommendations.find((r) => r.findingId === "gyro-lpf2")).toBeUndefined();
   });
 
   it("lowers D-term dyn max for high-throttle noise, dyn min for low-throttle noise", () => {

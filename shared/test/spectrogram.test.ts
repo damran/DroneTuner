@@ -88,4 +88,24 @@ describe("spectrogram peak classification", () => {
     expect(res.peaks.length).toBe(0);
     expect(res.floor).toBe(0);
   });
+
+  it("labels a fixed peak at the motors' idle speed as motorIdle, not a frame resonance", () => {
+    const n = FS * DURATION_S;
+    const gyro = new Float32Array(n);
+    // Dynamic idle parks the motors at 2500 rpm (41.7 Hz) for the first half
+    // of the log (hover at idle throttle), then the throttle ramps up.
+    const throttle = new Float32Array(n);
+    const erpm = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      throttle[i] = i < n / 2 ? 1000 : 1000 + (2000 * (i - n / 2)) / n;
+      erpm[i] = 42 + 0.25 * (throttle[i]! - 1000);
+      gyro[i] = 6 * Math.sin((2 * Math.PI * 42 * i) / FS) + 5 * Math.sin((2 * Math.PI * 230 * i) / FS);
+    }
+    const sg = computeSpectrogram(gyro, FS, { throttle, erpmHz: erpm });
+    const res = classifyPeaks("roll", sg, { minFreqHz: 30 });
+    const idle = res.peaks.find((p) => Math.abs(p.freqHz - 42) < 8);
+    const frame = res.peaks.find((p) => Math.abs(p.freqHz - 230) < 10);
+    expect(idle?.kind).toBe("motorIdle");
+    expect(frame?.kind).toBe("frameResonance");
+  });
 });

@@ -28,7 +28,14 @@ export interface Spectrogram {
   windowSize: number;
 }
 
-export type PeakKind = "frameResonance" | "motorHarmonic" | "unknown";
+/**
+ * - frameResonance: fixed frequency, throttle-independent → dynamic notch
+ * - motorHarmonic: frequency follows throttle/eRPM → RPM filter
+ * - motorIdle: fixed frequency that sits at the motors' lowest (idle) speed —
+ *   dynamic idle holds the motors there, so it looks like a resonance but is
+ *   motor noise below rpm_filter_min_hz. Never a dynamic-notch target.
+ */
+export type PeakKind = "frameResonance" | "motorHarmonic" | "motorIdle" | "unknown";
 
 export interface ClassifiedPeak {
   kind: PeakKind;
@@ -191,6 +198,11 @@ export function classifyPeaks(axis: Axis, sg: Spectrogram, options: ClassifyOpti
   };
   if (sg.rows.length < 4) return empty;
 
+  // Lowest motor speed seen while airborne (mean eRPM of the quietest rows):
+  // a stable peak there is idle-speed motor noise, not a frame resonance.
+  const erpmRows = sg.rows.map((r) => r.erpmHz).filter((v): v is number => v !== null && v > 0).sort((a, b) => a - b);
+  const idleHz = erpmRows.length >= 4 ? erpmRows[Math.floor(erpmRows.length * 0.02)]! : null;
+
   // Per-row noise floor and prominent peaks.
   const rowFloors: number[] = [];
   const rowPeaks: RowPeak[] = [];
@@ -283,7 +295,11 @@ export function classifyPeaks(axis: Axis, sg: Spectrogram, options: ClassifyOpti
     let kind: PeakKind = "unknown";
     const swept = corr !== null && corr > 0.7 && spread > Math.max(15, meanFreq * 0.1);
     const stable = spread < Math.max(10, meanFreq * 0.05) && (corr === null || Math.abs(corr) < 0.5);
+    const atIdle =
+      idleHz !== null &&
+      (Math.abs(meanFreq - idleHz) <= Math.max(6, idleHz * 0.15) || Math.abs(meanFreq - 2 * idleHz) <= Math.max(6, idleHz * 0.15));
     if (swept) kind = "motorHarmonic";
+    else if (stable && atIdle) kind = "motorIdle";
     else if (stable) kind = "frameResonance";
 
     const peak: ClassifiedPeak = {

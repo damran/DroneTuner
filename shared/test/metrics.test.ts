@@ -15,6 +15,8 @@ function makeLog(overrides: { headers?: Record<string, string>; channels?: Recor
   };
   return {
     headers: overrides.headers ?? {},
+    sessionIndex: 0,
+    sessionCount: 1,
     frameCount: n,
     timeUs: Float32Array.from({ length: n }, (_, i) => i * 500),
     channels,

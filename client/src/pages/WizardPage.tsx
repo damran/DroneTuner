@@ -2,8 +2,24 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { Analysis, DroneSummary, FlightLog, Profile, ProfileSettings, TuneGoal } from "@dronetuner/shared";
 import { TUNE_GOALS, TUNE_GOAL_LABELS } from "@dronetuner/shared";
-import { applyChanges, cliOnlyKeys, formatSettingValue, runRules, settingLabel, settingsToCli } from "@dronetuner/shared/tuning";
+import {
+  applyChanges,
+  applyVariant,
+  cliOnlyKeys,
+  filterDiffKeys,
+  formatSettingValue,
+  runRules,
+  settingLabel,
+  settingsToCli,
+  splitFilterScope,
+  TUNE_VARIANT_DESCRIPTIONS,
+  TUNE_VARIANT_LABELS,
+  TUNE_VARIANTS,
+  type TuneVariant,
+} from "@dronetuner/shared/tuning";
 import { estimateFilterDelay, filterConfigFromProfile } from "@dronetuner/shared/analysis";
+import { useMspStore } from "@/lib/msp";
+import { useAdvanced } from "@/lib/ui-store";
 import { apiGet, apiPost } from "@/lib/api";
 import { useApplyStore } from "@/lib/apply-store";
 import { Badge } from "@/components/ui/badge";
@@ -19,6 +35,41 @@ import {
 } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
+/** Every unordered pair of variants, crisp-first, for the A/B picker. */
+const AB_PAIRS: [TuneVariant, TuneVariant][] = TUNE_VARIANTS.flatMap((a, i) =>
+  TUNE_VARIANTS.slice(i + 1).map((b) => [a, b] as [TuneVariant, TuneVariant]),
+);
+
+const shortVariantLabel = (v: TuneVariant): string => TUNE_VARIANT_LABELS[v].split(" (")[0]!;
+
+/**
+ * What the two profiles actually differ in, and which filter settings are
+ * master settings both profiles share (so the pilot does not credit a gyro
+ * LPF or notch change to "A vs B").
+ */
+function AbScopeNote({ a, b }: { a: ProfileSettings; b: ProfileSettings }) {
+  const differs = filterDiffKeys(a.filters, b.filters);
+  const { master } = splitFilterScope(a.filters);
+  const masterKeys = Object.keys(master).filter((k) => (master as Record<string, number>)[k] !== undefined);
+  return (
+    <div className="space-y-1 text-xs text-muted-foreground">
+      <p>
+        <span className="font-medium text-foreground">Differs between A and B:</span>{" "}
+        {differs.length > 0 ? differs.map((k) => settingLabel("filters", k)).join(", ") : "nothing (same variant on both sides)"}.
+      </p>
+      {masterKeys.length > 0 && (
+        <p>
+          <span className="font-medium text-foreground">Shared by both profiles (master settings):</span>{" "}
+          {masterKeys
+            .map((k) => `${settingLabel("filters", k)} ${formatSettingValue(`filters.${k}`, (master as Record<string, number>)[k]!)}`)
+            .join(" · ")}
+          .
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function WizardPage() {
   const [droneId, setDroneId] = useState<string>("");
   const [goal, setGoal] = useState<TuneGoal>("freestyle");
@@ -28,6 +79,12 @@ export default function WizardPage() {
   // Recommendations are opt-in: none is folded into the draft until ticked.
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const start = useApplyStore((s) => s.start);
+  const fcStatus = useMspStore((s) => s.status);
+  const advanced = useAdvanced();
+  // In-flight A/B: which two variants, and which PID profile slot each gets.
+  const [abPair, setAbPair] = useState<[TuneVariant, TuneVariant]>(["crisp", "balanced"]);
+  const [abSlots, setAbSlots] = useState<[number, number]>([0, 1]);
+  const [copiedVariant, setCopiedVariant] = useState<string | null>(null);
 
   const { data: drones } = useQuery({
     queryKey: ["drones"],
@@ -53,11 +110,17 @@ export default function WizardPage() {
     retry: false,
   });
 
+  // Match on size class + video system (HD whoops carry more mass and get their
+  // own templates); a template with videoSystem null fits any build.
   const template = useMemo(() => {
     if (!drone) return undefined;
+    const byGoal = (templates ?? []).filter((t) => t.goal === goal);
+    const sameClass = byGoal.filter((t) => t.sizeClass === drone.sizeClass);
     return (
-      templates?.find((t) => t.sizeClass === drone.sizeClass && t.goal === goal) ??
-      templates?.find((t) => t.goal === goal)
+      sameClass.find((t) => t.videoSystem === (drone.videoSystem ?? "analog")) ??
+      sameClass.find((t) => !t.videoSystem) ??
+      sameClass[0] ??
+      byGoal.find((t) => !t.sizeClass)
     );
   }, [templates, drone, goal]);
 
@@ -118,6 +181,20 @@ export default function WizardPage() {
   }, [draftSettings]);
 
   const draftCli = useMemo(() => (draftSettings ? settingsToCli(draftSettings) : []), [draftSettings]);
+
+  // Variant settings for the A/B: only the D-term chain differs (gyro
+  // filters, dyn notch and RPM filter are master settings shared by every
+  // PID profile — see shared/src/tuning/variants.ts).
+  const abVariants = useMemo(() => {
+    if (!draftSettings) return null;
+    return (["A", "B"] as const).map((side, i) => {
+      const variant = abPair[i]!;
+      const settings = applyVariant(draftSettings, variant, "profile");
+      const delay = estimateFilterDelay(filterConfigFromProfile(settings), {});
+      return { side, variant, settings, delay, label: `${side} · ${shortVariantLabel(variant)}` };
+    });
+  }, [draftSettings, abPair]);
+  const profileCount = fcStatus?.pidProfileCount ?? 3;
 
   const copyCli = async (lines: string[], done: () => void) => {
     await navigator.clipboard.writeText(lines.join("\n") + "\nsave\n");
@@ -210,7 +287,8 @@ export default function WizardPage() {
               <CardTitle className="text-sm">Baseline: {template.name}</CardTitle>
               <Badge variant="secondary">template</Badge>
             </CardHeader>
-            <CardContent className="p-4">
+            <CardContent className="space-y-2 p-4">
+              {template.notes && <p className="text-sm">{template.notes}</p>}
               <p className="text-sm text-muted-foreground">
                 {analysis
                   ? `${recommendations.length} analysis-driven recommendation(s) available — tick the ones you want in the draft.`
@@ -260,7 +338,7 @@ export default function WizardPage() {
                               </Badge>
                             )}
                           </div>
-                          {r.cliLines && r.cliLines.length > 0 && (
+                          {advanced && r.cliLines && r.cliLines.length > 0 && (
                             <details className="mt-1">
                               <summary className="cursor-pointer text-xs text-muted-foreground">
                                 View config ({r.cliLines.length} line{r.cliLines.length > 1 ? "s" : ""})
@@ -290,6 +368,131 @@ export default function WizardPage() {
             </Card>
           )}
 
+          {draftSettings && abVariants && (
+            <Card>
+              <CardHeader className="p-4">
+                <CardTitle className="text-sm">Compare in flight (A/B)</CardTitle>
+                <p className="text-xs text-muted-foreground">
+                  Two versions of this draft are written into two PID profiles. They share PIDs, feedforward, rates and the
+                  gyro filters (those are global); only the D-term filter chain differs, so what you feel on the switch is the
+                  filtering-vs-delay trade-off itself.
+                </p>
+              </CardHeader>
+              <CardContent className="space-y-3 p-4 pt-0">
+                <div className="flex flex-wrap items-end gap-3">
+                  <div className="space-y-1">
+                    <Label>Pair</Label>
+                    <Select
+                      value={abPair.join("|")}
+                      onValueChange={(v) => setAbPair(v.split("|") as [TuneVariant, TuneVariant])}
+                    >
+                      <SelectTrigger className="w-56">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {AB_PAIRS.map(([a, b]) => (
+                          <SelectItem key={`${a}|${b}`} value={`${a}|${b}`}>
+                            {shortVariantLabel(a)} vs {shortVariantLabel(b)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {(["A", "B"] as const).map((side, i) => (
+                    <div key={side} className="space-y-1">
+                      <Label>Profile slot for {side}</Label>
+                      <Select
+                        value={String(abSlots[i])}
+                        onValueChange={(v) => {
+                          const next: [number, number] = [...abSlots] as [number, number];
+                          next[i] = Number(v);
+                          setAbSlots(next);
+                        }}
+                      >
+                        <SelectTrigger className="w-32">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {Array.from({ length: profileCount }, (_, n) => (
+                            <SelectItem key={n} value={String(n)}>
+                              PID profile {n + 1}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  ))}
+                </div>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Variant</TableHead>
+                      <TableHead>D-term LPF1 (dyn)</TableHead>
+                      <TableHead>D-term LPF2</TableHead>
+                      <TableHead title="Predicted group delay of the D-term path at 50 Hz, min–max throttle">D-path delay</TableHead>
+                      <TableHead>Feel</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {abVariants.map((v) => (
+                      <TableRow key={v.side}>
+                        <TableCell className="font-medium">{v.label}</TableCell>
+                        <TableCell>
+                          {v.settings.filters?.dtermLowpassDynMinHz ?? "—"}–{v.settings.filters?.dtermLowpassDynMaxHz ?? "—"} Hz
+                        </TableCell>
+                        <TableCell>{v.settings.filters?.dtermLowpass2Hz ?? "—"} Hz</TableCell>
+                        <TableCell>
+                          {v.delay.dtermMs.toFixed(1)}–{v.delay.dtermMsMax.toFixed(1)} ms
+                        </TableCell>
+                        <TableCell className="max-w-xs text-xs text-muted-foreground">{TUNE_VARIANT_DESCRIPTIONS[v.variant]}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                <AbScopeNote a={abVariants[0]!.settings} b={abVariants[1]!.settings} />
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    disabled={abSlots[0] === abSlots[1]}
+                    onClick={() => {
+                      if (!drone) return;
+                      start({
+                        droneId: drone.id,
+                        profileName: "A/B",
+                        ab: abVariants.map((v, i) => ({ label: v.label, profile: abSlots[i]!, settings: v.settings })),
+                      });
+                    }}
+                  >
+                    Write A and B to the FC
+                  </Button>
+                  {abVariants.map((v, i) => (
+                    <Button
+                      key={v.side}
+                      variant="outline"
+                      onClick={() =>
+                        void navigator.clipboard
+                          .writeText([`profile ${abSlots[i]}`, ...settingsToCli(v.settings), "save", ""].join("\n"))
+                          .then(() => {
+                            setCopiedVariant(v.side);
+                            setTimeout(() => setCopiedVariant(null), 2000);
+                          })
+                      }
+                    >
+                      {copiedVariant === v.side ? "Copied" : `Copy CLI for ${v.side}`}
+                    </Button>
+                  ))}
+                </div>
+                {abSlots[0] === abSlots[1] && (
+                  <p className="text-xs text-destructive">A and B need two different PID profile slots.</p>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  After writing: fly A, land and disarm, switch to profile B (Betaflight 4.5 cannot change PID profiles from a
+                  switch in flight — use the stick command or the OSD menu → Profiles), fly the same lines again in the same
+                  pack. Every arm starts a new blackbox session, so the Log Lab can compare A and B side by side.
+                </p>
+              </CardContent>
+            </Card>
+          )}
+
           {draftSettings && (
             <Card>
               <CardHeader className="flex-row items-center justify-between p-4">
@@ -304,7 +507,11 @@ export default function WizardPage() {
                 )}
               </CardHeader>
               <CardContent className="p-4">
-                <SettingsTable settings={draftSettings} />
+                {advanced ? (
+                  <SettingsTable settings={draftSettings} />
+                ) : (
+                  <DraftSummary settings={draftSettings} />
+                )}
                 <div className="mt-4 flex flex-wrap gap-2">
                   <Button
                     onClick={() => {
@@ -336,6 +543,32 @@ export default function WizardPage() {
         </div>
       )}
     </div>
+  );
+}
+
+/** Plain-language summary of a draft for Simple mode. */
+function DraftSummary({ settings }: { settings: ProfileSettings }) {
+  const p = settings.pids;
+  const f = settings.filters ?? {};
+  const a = settings.advanced ?? {};
+  const r = settings.rates ?? {};
+  const items: string[] = [];
+  if (p?.roll && p.pitch) items.push(`PIDs roll ${p.roll.p}/${p.roll.i}/${p.roll.d}, pitch ${p.pitch.p}/${p.pitch.i}/${p.pitch.d}`);
+  if (a.feedforwardRoll !== undefined) items.push(a.feedforwardRoll === 0 ? "No feedforward" : `Feedforward ${a.feedforwardRoll}/${a.feedforwardPitch}`);
+  if (f.dynNotchCount !== undefined) items.push(`${f.dynNotchCount} dynamic notch${f.dynNotchCount === 1 ? "" : "es"} ${f.dynNotchMinHz ?? "?"}–${f.dynNotchMaxHz ?? "?"} Hz`);
+  if (f.rpmFilterHarmonics !== undefined) items.push(`RPM filter ${f.rpmFilterHarmonics} harmonic${f.rpmFilterHarmonics === 1 ? "" : "s"}`);
+  if (f.dtermLowpassDynMinHz !== undefined) items.push(`D-term filtering ${f.dtermLowpassDynMinHz}–${f.dtermLowpassDynMaxHz} Hz + ${f.dtermLowpass2Hz ?? "—"} Hz`);
+  if (a.tpaRate !== undefined) items.push(`TPA ${a.tpaRate}% from ${a.tpaBreakpoint}`);
+  if (r.rcRate !== undefined && r.rollRate !== undefined) items.push(`Rates ${r.rcRate * 10}°/s centre, ${r.rollRate * 10}°/s max, expo ${((r.rcExpo ?? 0) / 100).toFixed(2)}`);
+  return (
+    <ul className="grid gap-1 text-sm sm:grid-cols-2">
+      {items.map((t) => (
+        <li key={t} className="rounded-md bg-muted/50 px-3 py-2">
+          {t}
+        </li>
+      ))}
+      <li className="rounded-md px-3 py-2 text-xs text-muted-foreground">Switch on Advanced mode for every value.</li>
+    </ul>
   );
 }
 

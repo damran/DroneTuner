@@ -41,3 +41,18 @@ export function formatPercent(v: number | null | undefined): string {
   if (v == null) return "—";
   return `${v.toFixed(1)}%`;
 }
+
+/**
+ * Short title for a blackbox log: the download name without the
+ * "BTFL_BLACKBOX_LOG_" prefix and extension, e.g. "AIR65_R_20260518_125703_BETAFPVG473".
+ */
+export function formatLogName(originalName: string | null | undefined): string | null {
+  if (!originalName) return null;
+  return originalName.replace(/^BTFL_BLACKBOX_LOG_/i, "").replace(/\.[^.]+$/, "");
+}
+
+/** "Flight 3 of 7" for multi-session files, null for single-session uploads. */
+export function formatSession(sessionIndex: number, sessionCount: number): string | null {
+  if (sessionCount <= 1) return null;
+  return `Flight ${sessionIndex + 1} of ${sessionCount}`;
+}

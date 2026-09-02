@@ -3,9 +3,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { Star, Trash2, Upload } from "lucide-react";
 import type { Component, ComponentCategory, DroneDetail, Flight } from "@dronetuner/shared";
-import { COMPONENT_CATEGORIES, COMPONENT_CATEGORY_LABELS, FLIGHT_STYLE_TAGS } from "@dronetuner/shared";
+import { COMPONENT_CATEGORIES, COMPONENT_CATEGORY_LABELS, FLIGHT_STYLE_TAGS, VIDEO_SYSTEMS, VIDEO_SYSTEM_LABELS } from "@dronetuner/shared";
 import { apiDelete, apiGet, apiPatch, apiPost, photoUrl } from "@/lib/api";
-import { formatDate, formatDuration } from "@/lib/format";
+import { formatDate, formatDateTime, formatDuration, formatLogName, formatSession } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -57,6 +57,26 @@ export default function DroneDetailPage() {
         </Link>
         <h1 className="text-2xl font-semibold">{drone.name}</h1>
         <Badge variant="secondary">{drone.sizeClass}</Badge>
+        <Select
+          value={drone.videoSystem ?? "unset"}
+          onValueChange={(v) =>
+            void apiPatch(`/api/drones/${droneId}`, { videoSystem: v === "unset" ? null : v }).then(() =>
+              qc.invalidateQueries({ queryKey: ["drone", droneId] }),
+            )
+          }
+        >
+          <SelectTrigger className="h-7 w-36 text-xs" aria-label="Video system">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="unset">Video: not set</SelectItem>
+            {VIDEO_SYSTEMS.map((v) => (
+              <SelectItem key={v} value={v}>
+                {VIDEO_SYSTEM_LABELS[v]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <Tabs defaultValue="overview">
@@ -446,7 +466,9 @@ function FlightsAndLogs({
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Uploaded</TableHead>
+                  <TableHead>Log</TableHead>
+                  <TableHead>Recorded</TableHead>
+                  <TableHead>Duration</TableHead>
                   <TableHead>Firmware</TableHead>
                   <TableHead />
                 </TableRow>
@@ -454,7 +476,16 @@ function FlightsAndLogs({
               <TableBody>
                 {logs.map((l) => (
                   <TableRow key={l.id}>
-                    <TableCell>{formatDate(l.uploadedAt)}</TableCell>
+                    <TableCell>
+                      <div className="max-w-[16rem] truncate" title={l.originalName ?? undefined}>
+                        {formatLogName(l.originalName) ?? formatDate(l.uploadedAt)}
+                      </div>
+                      {formatSession(l.sessionIndex, l.sessionCount) && (
+                        <div className="text-xs text-muted-foreground">{formatSession(l.sessionIndex, l.sessionCount)}</div>
+                      )}
+                    </TableCell>
+                    <TableCell>{formatDateTime(l.recordedAt ?? l.uploadedAt)}</TableCell>
+                    <TableCell>{formatDuration(l.durationS)}</TableCell>
                     <TableCell className="text-muted-foreground">{l.headers?.["Firmware revision"] ?? "—"}</TableCell>
                     <TableCell className="flex gap-2">
                       <Button size="sm" variant="outline" onClick={() => analyze(l.id)}>

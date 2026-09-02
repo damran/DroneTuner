@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
+import { useChartTheme } from "@/lib/chart-theme";
 
 export interface UplotSeries {
   label: string;
@@ -25,12 +26,14 @@ export function UplotChart({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
+  const theme = useChartTheme();
 
   useEffect(() => {
     if (!ref.current) return;
     if (x.length === 0 || series.some((s) => s.data.length !== x.length)) return;
 
     const usesRightAxis = series.some((s) => s.scale === "d");
+    const axisStyle = { stroke: theme.text, grid: { stroke: theme.grid, width: 1 }, ticks: { stroke: theme.grid, width: 1 } };
     const opts: uPlot.Options = {
       width: ref.current.clientWidth,
       height,
@@ -42,17 +45,17 @@ export function UplotChart({
         ...(usesRightAxis ? { d: { auto: true } } : {}),
       },
       axes: [
-        { label: xLabel, size: 60 },
-        { label: yLabel ?? "", size: 60 },
+        { label: xLabel, size: 60, ...axisStyle },
+        { label: yLabel ?? "", size: 60, ...axisStyle },
         ...(usesRightAxis
-          ? [{ side: 1 as const, scale: "d", label: "D-term (raw)", size: 60, grid: { show: false } }]
+          ? [{ side: 1 as const, scale: "d", label: "D-term (raw)", size: 60, stroke: theme.text, grid: { show: false }, ticks: { stroke: theme.grid, width: 1 } }]
           : []),
       ],
       series: [
         {},
-        ...series.map((s) => ({
+        ...series.map((s, i) => ({
           label: s.label,
-          stroke: s.stroke ?? "#22d3ee",
+          stroke: s.stroke ?? theme.series[i % theme.series.length],
           width: 1,
           points: { show: false },
           scale: s.scale ?? "y",
@@ -75,7 +78,7 @@ export function UplotChart({
       plotRef.current?.destroy();
       plotRef.current = null;
     };
-  }, [x, series, height, yLabel, xLabel]);
+  }, [x, series, height, yLabel, xLabel, theme]);
 
   return <div ref={ref} className="w-full" />;
 }

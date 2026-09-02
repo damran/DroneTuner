@@ -2,12 +2,22 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { FileUp, Loader2 } from "lucide-react";
-import type { Analysis, DroneSummary, Flight, FlightLog } from "@dronetuner/shared";
+import type { Analysis, DroneSummary, Flight, FlightLog, LogUploadResult } from "@dronetuner/shared";
 import { compareAnalyses, type AnalysisComparison } from "@dronetuner/shared/analysis";
 import type { SpectrumSeries, TracesResult, WorkerOut } from "@/lib/loglab/traces-worker";
 import { apiGet, apiPost } from "@/lib/api";
-import { formatDate, formatDuration, formatPercent, formatVolts } from "@/lib/format";
+import {
+  formatDate,
+  formatDateTime,
+  formatDuration,
+  formatLogName,
+  formatPercent,
+  formatSession,
+  formatVolts,
+} from "@/lib/format";
 import { EChart } from "@/components/charts/EChart";
+import { useChartTheme, type ChartTheme } from "@/lib/chart-theme";
+import { useAdvanced } from "@/lib/ui-store";
 import { UplotChart } from "@/components/charts/UplotChart";
 import FindingsPanel from "@/components/FindingsPanel";
 import RatesAdvisor from "@/components/RatesAdvisor";
@@ -23,7 +33,11 @@ import {
 } from "@/components/ui/select";
 
 /** Parse + analyze a log off the main thread; resolves with chart-ready data. */
-function runTracesWorker(buffer: ArrayBuffer, onStage: (stage: string) => void): Promise<TracesResult> {
+function runTracesWorker(
+  buffer: ArrayBuffer,
+  sessionIndex: number,
+  onStage: (stage: string) => void,
+): Promise<TracesResult> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL("../lib/loglab/traces-worker.ts", import.meta.url), {
       type: "module",
@@ -42,7 +56,7 @@ function runTracesWorker(buffer: ArrayBuffer, onStage: (stage: string) => void):
       worker.terminate();
       reject(new Error(e.message || "Trace worker failed"));
     };
-    worker.postMessage({ buffer, maxFrames: 300_000 }, [buffer]);
+    worker.postMessage({ buffer, maxFrames: 300_000, sessionIndex }, [buffer]);
   });
 }
 
@@ -57,6 +71,7 @@ export default function LogLabPage() {
   const [traceStage, setTraceStage] = useState<string | null>(null);
   const [traceError, setTraceError] = useState<string | null>(null);
   const [traces, setTraces] = useState<TracesResult | null>(null);
+  const [uploadNote, setUploadNote] = useState<string | null>(null);
 
   // Deep link from the drone page: /logs?log=<id>
   useEffect(() => {
@@ -101,14 +116,25 @@ export default function LogLabPage() {
   const drone = drones?.find((d) => String(d.id) === droneId);
   const flightForLog = flights?.find((f) => f.logId === selectedLog);
 
-  // Previous log of the same drone (logs arrive newest-first) for the
-  // "current vs last blackbox" comparison.
+  // Comparison partner: by default the previous flight of the same drone
+  // (logs arrive newest-first); for an A/B test the pilot picks the other
+  // profile's session explicitly.
   const selectedLogEntry = logs?.find((l) => l.id === selectedLog) ?? null;
+  // The partner choice is remembered per selected log: a partner picked for
+  // one log makes no sense for the next (it may even be the newly selected
+  // log itself), so any other log falls back to "previous".
+  const [compareChoice, setCompareChoice] = useState<{ forLog: number | null; value: number | "previous" }>({
+    forLog: null,
+    value: "previous",
+  });
+  const compareWith: number | "previous" = compareChoice.forLog === selectedLog ? compareChoice.value : "previous";
+  const setCompareWith = (value: number | "previous") => setCompareChoice({ forLog: selectedLog, value });
   const previousLog = useMemo(() => {
     if (!logs || selectedLog === null) return null;
+    if (compareWith !== "previous") return logs.find((l) => l.id === compareWith && l.id !== selectedLog) ?? null;
     const idx = logs.findIndex((l) => l.id === selectedLog);
     return idx >= 0 && idx + 1 < logs.length ? logs[idx + 1]! : null;
-  }, [logs, selectedLog]);
+  }, [logs, selectedLog, compareWith]);
   const prevAnalysisQuery = useQuery({
     queryKey: ["analysis", previousLog?.id],
     enabled: !!previousLog && !!analysisQuery.data,
@@ -132,9 +158,16 @@ export default function LogLabPage() {
       if (!res.ok) throw new Error(await res.text());
       return res.json();
     },
-    onSuccess: (log: FlightLog) => {
+    onSuccess: (result: LogUploadResult) => {
       void qc.invalidateQueries({ queryKey: ["logs", droneId] });
-      setSelectedLog(log.id);
+      setUploadNote(
+        result.sessionCount > 1
+          ? `${result.logs.length} flight${result.logs.length === 1 ? "" : "s"} imported from this file` +
+              (result.skippedSessions > 0 ? ` (${result.skippedSessions} short arm/disarm blip${result.skippedSessions === 1 ? "" : "s"} skipped)` : "")
+          : null,
+      );
+      const first = result.logs[0];
+      if (first) setSelectedLog(first.id);
     },
   });
 
@@ -149,10 +182,11 @@ export default function LogLabPage() {
     setTraceError(null);
     setTraces(null);
     try {
+      const entry = logs?.find((l) => l.id === logId);
       const res = await fetch(`/api/logs/${logId}/file`);
       if (!res.ok) throw new Error(`Log download failed (${res.status})`);
       const buf = await res.arrayBuffer();
-      setTraces(await runTracesWorker(buf, setTraceStage));
+      setTraces(await runTracesWorker(buf, entry?.sessionIndex ?? 0, setTraceStage));
     } catch (e) {
       setTraceError(String(e instanceof Error ? e.message : e));
     } finally {
@@ -205,6 +239,7 @@ export default function LogLabPage() {
         <p className="text-xs text-muted-foreground">
           Don&apos;t have a log yet? See the <a href="/guide" className="text-primary underline">Guide</a>.
         </p>
+        {uploadNote && <p className="basis-full text-xs text-muted-foreground">{uploadNote}</p>}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
@@ -226,8 +261,14 @@ export default function LogLabPage() {
                     selectedLog === l.id ? "bg-accent" : "hover:bg-accent/50"
                   }`}
                 >
-                  <div className="font-medium">{formatDate(l.uploadedAt)}</div>
-                  <div className="text-xs text-muted-foreground">{l.headers?.["Firmware revision"] ?? "unknown firmware"}</div>
+                  <div className="truncate font-medium" title={l.originalName ?? undefined}>
+                    {formatLogName(l.originalName) ?? formatDate(l.uploadedAt)}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {[formatSession(l.sessionIndex, l.sessionCount), l.durationS != null ? formatDuration(l.durationS) : null, formatDateTime(l.recordedAt ?? l.uploadedAt)]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </div>
                 </button>
               ))}
             </div>
@@ -292,6 +333,32 @@ export default function LogLabPage() {
             </Card>
           )}
 
+          {analysisQuery.data && logs && logs.length > 1 && (
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <Label className="text-xs">Compare with</Label>
+              <Select value={String(compareWith)} onValueChange={(v) => setCompareWith(v === "previous" ? "previous" : Number(v))}>
+                <SelectTrigger className="h-8 w-72 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="previous">Previous flight</SelectItem>
+                  {logs
+                    .filter((l) => l.id !== selectedLog)
+                    .map((l) => (
+                      <SelectItem key={l.id} value={String(l.id)}>
+                        {[formatLogName(l.originalName) ?? formatDate(l.uploadedAt), formatSession(l.sessionIndex, l.sessionCount)]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+              {previousLog && prevAnalysisQuery.isError && (
+                <span className="text-xs text-muted-foreground">That flight has no analysis yet — analyze it first.</span>
+              )}
+            </div>
+          )}
+
           {comparison && previousLog && (
             <ComparisonCard comparison={comparison} previousLog={previousLog} />
           )}
@@ -306,7 +373,7 @@ export default function LogLabPage() {
             <Card>
               <CardContent className="space-y-1 p-4">
                 {traces.truncated && (
-                  <p className="text-sm text-amber-500">
+                  <p className="text-sm text-warning">
                     Long log — parsing stopped at the 300k frame cap. Traces and spectra cover the
                     first portion only.
                   </p>
@@ -359,6 +426,7 @@ function MetricsCards({ analysis }: { analysis: Analysis }) {
 
 /** Pure renderer — all parsing/FFT/step math arrived chart-ready from the worker. */
 function TracesView({ data }: { data: TracesResult }) {
+  const theme = useChartTheme();
   return (
     <div className="space-y-4">
       {data.gyroSeries.map((s) => (
@@ -371,9 +439,9 @@ function TracesView({ data }: { data: TracesResult }) {
               x={s.x}
               yLabel="deg/s"
               series={[
-                { label: "gyro", data: s.gyro, stroke: "#22d3ee" },
-                { label: "setpoint", data: s.setpoint, stroke: "#a78bfa" },
-                { label: "D-term (raw)", data: s.dterm, stroke: "#f472b6", scale: "d" },
+                { label: "gyro", data: s.gyro, stroke: theme.series[0] },
+                { label: "setpoint", data: s.setpoint, stroke: theme.series[1] },
+                { label: "D-term (raw)", data: s.dterm, stroke: theme.series[2], scale: "d" },
               ]}
             />
           </CardContent>
@@ -393,7 +461,7 @@ function TracesView({ data }: { data: TracesResult }) {
               series={data.stepSeries.map((s, i) => ({
                 label: s.axis,
                 data: s.response,
-                stroke: ["#22d3ee", "#a78bfa", "#f472b6"][i],
+                stroke: theme.series[i % theme.series.length],
               }))}
             />
           </CardContent>
@@ -406,11 +474,12 @@ function TracesView({ data }: { data: TracesResult }) {
             <CardTitle className="text-sm">Gyro noise spectrum (airborne average)</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2 p-2">
-            <EChart option={buildSpectrumOption(data.spectrum)} height={300} />
+            <EChart option={buildSpectrumOption(data.spectrum, theme)} height={300} />
             <p className="px-2 text-xs text-muted-foreground">
               Averaged over airborne spectrogram windows — the same analysis the findings use.
-              Markers: <span className="text-amber-500">frame resonance → dynamic notch</span>,{" "}
-              <span className="text-sky-400">motor harmonic → RPM filter</span>.
+              Markers: <span className="text-warning">frame resonance → dynamic notch</span>,{" "}
+              <span className="text-info">motor harmonic → RPM filter</span>,{" "}
+              <span className="text-chart-2">idle-speed motor noise → rpm_filter_min_hz / dynamic idle</span>.
             </p>
           </CardContent>
         </Card>
@@ -420,16 +489,16 @@ function TracesView({ data }: { data: TracesResult }) {
 }
 
 /** Averaged airborne spectrum per axis with classified-peak markers. */
-function buildSpectrumOption(spectrum: SpectrumSeries[]) {
-  const colors = ["#22d3ee", "#a78bfa", "#f472b6"];
+function buildSpectrumOption(spectrum: SpectrumSeries[], t: ChartTheme) {
+  const colors = t.series;
   return {
     backgroundColor: "transparent",
-    textStyle: { color: "#9ca3af" },
+    textStyle: { color: t.text },
     tooltip: { trigger: "axis" as const },
-    legend: { textStyle: { color: "#9ca3af" }, data: spectrum.map((s) => s.axis) },
+    legend: { textStyle: { color: t.text }, data: spectrum.map((s) => s.axis) },
     grid: { left: 60, right: 20, top: 40, bottom: 40 },
-    xAxis: { type: "value" as const, name: "Hz", nameTextStyle: { color: "#9ca3af" }, axisLabel: { color: "#9ca3af" } },
-    yAxis: { type: "value" as const, name: "amplitude", nameTextStyle: { color: "#9ca3af" }, axisLabel: { color: "#9ca3af" } },
+    xAxis: { type: "value" as const, name: "Hz", nameTextStyle: { color: t.text }, axisLabel: { color: t.text }, splitLine: { lineStyle: { color: t.grid } } },
+    yAxis: { type: "value" as const, name: "amplitude", nameTextStyle: { color: t.text }, axisLabel: { color: t.text }, splitLine: { lineStyle: { color: t.grid } } },
     series: spectrum.map((s, i) => ({
       name: s.axis,
       type: "line" as const,
@@ -444,9 +513,9 @@ function buildSpectrumOption(spectrum: SpectrumSeries[]) {
           .filter((p) => p.kind !== "unknown")
           .map((p) => ({
             xAxis: p.freqHz,
-            label: { formatter: `${p.freqHz} Hz`, color: "#9ca3af" },
+            label: { formatter: `${p.freqHz} Hz`, color: t.text },
             lineStyle: {
-              color: p.kind === "frameResonance" ? "#f59e0b" : "#38bdf8",
+              color: p.kind === "frameResonance" ? t.warning : p.kind === "motorIdle" ? t.accent : t.info,
               type: "dashed" as const,
             },
           })),
@@ -457,6 +526,7 @@ function buildSpectrumOption(spectrum: SpectrumSeries[]) {
 
 /** Per-stage group-delay breakdown of the filter chain flown in this log. */
 function FilterDelayCard({ analysis }: { analysis: Analysis }) {
+  const advanced = useAdvanced();
   const d = analysis.metrics.filterDelay;
   if (!d) {
     return (
@@ -480,14 +550,23 @@ function FilterDelayCard({ analysis }: { analysis: Analysis }) {
           Group delay of the filter chain from this log&apos;s config (ranges span 0–100% throttle for dynamic
           lowpasses). Lower = snappier; well-tuned builds land around 3–5 ms on the D path.
         </p>
-        <div className="space-y-1">
-          {d.stages.map((s) => (
-            <div key={s.name} className="flex items-center justify-between text-sm">
-              <span>{s.name}</span>
-              <span className="text-muted-foreground">{s.ms.toFixed(2)} ms</span>
-            </div>
-          ))}
-        </div>
+        {advanced ? (
+          <div className="space-y-1">
+            {d.stages.map((s) => (
+              <div key={s.name} className="flex items-center justify-between text-sm">
+                <span>{s.name}</span>
+                <span className="text-muted-foreground">{s.ms.toFixed(2)} ms</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            {d.stages.length > 0
+              ? `Biggest contributor: ${d.stages.reduce((a, b) => (a.ms > b.ms ? a : b)).name}.`
+              : "No filter stage is active."}{" "}
+            Switch on Advanced mode for the per-stage breakdown.
+          </p>
+        )}
         {d.warnings.length > 0 && (
           <p className="mt-2 text-xs text-muted-foreground">{d.warnings.join(" ")}</p>
         )}
@@ -528,13 +607,13 @@ function NoiseSourcesCard({ analysis }: { analysis: Analysis }) {
               <span
                 className={
                   p.kind === "frameResonance"
-                    ? "text-amber-500"
+                    ? "text-warning"
                     : p.kind === "motorHarmonic"
-                      ? "text-sky-400"
+                      ? "text-info"
                       : "text-muted-foreground"
                 }
               >
-                {p.kind === "frameResonance" ? "frame resonance → dyn notch" : p.kind === "motorHarmonic" ? "motor harmonic → RPM filter" : "unclassified"}
+                {p.kind === "frameResonance" ? "frame resonance → dyn notch" : p.kind === "motorHarmonic" ? "motor harmonic → RPM filter" : p.kind === "motorIdle" ? "idle-speed motor noise" : "unclassified"}
               </span>
             </div>
           ))}
@@ -561,7 +640,10 @@ function ComparisonCard({
   return (
     <Card>
       <CardHeader className="p-4">
-        <CardTitle className="text-sm">vs previous log ({formatDate(previousLog.uploadedAt)})</CardTitle>
+        <CardTitle className="text-sm">
+          vs previous flight ({formatSession(previousLog.sessionIndex, previousLog.sessionCount) ?? formatLogName(previousLog.originalName) ?? formatDate(previousLog.uploadedAt)}
+          {previousLog.recordedAt ? `, ${formatDateTime(previousLog.recordedAt)}` : ""})
+        </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4 p-4 pt-0">
         {comparison.settingChanges.length > 0 && (
@@ -586,7 +668,10 @@ function ComparisonCard({
         )}
         {comparison.metricDeltas.length > 0 && (
           <div>
-            <div className="mb-1 text-xs font-medium text-muted-foreground">Results</div>
+            <div className="mb-1 text-xs font-medium text-muted-foreground">
+              Results — {comparison.metricDeltas.filter((d) => d.verdict === "better").length} better,{" "}
+              {comparison.metricDeltas.filter((d) => d.verdict === "worse").length} worse
+            </div>
             <div className="space-y-1">
               {comparison.metricDeltas.map((d) => (
                 <div key={d.label} className="flex items-center justify-between gap-2 text-sm">
@@ -596,9 +681,9 @@ function ComparisonCard({
                     <span
                       className={
                         d.verdict === "better"
-                          ? "text-emerald-500"
+                          ? "text-success"
                           : d.verdict === "worse"
-                            ? "text-red-500"
+                            ? "text-destructive"
                             : "text-muted-foreground"
                       }
                     >

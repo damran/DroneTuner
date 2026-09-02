@@ -19,7 +19,11 @@ const steps = [
   },
   {
     title: "5. Upload here",
-    body: "Open the Log Lab, pick the drone, and upload the .bbl file. Click Analyze to get metrics and findings, then Load traces to inspect gyro/setpoint/D-term and the FFT noise spectrum.",
+    body: "Open the Log Lab, pick the drone, and upload the .bbl file. A flash download holds one session per arm: every flight becomes its own entry (short arm/disarm blips are skipped). Click Analyze to get metrics and findings, then Load traces to inspect gyro/setpoint/D-term and the FFT noise spectrum.",
+  },
+  {
+    title: "6. A/B test crisp vs smooth in one pack",
+    body: "In the Tuning Wizard, 'Compare in flight' writes two versions of your draft into two PID profiles: same PIDs, feedforward and rates, only the D-term filter chain differs. Fly A for 30 s with a few sharp moves and throttle chops, land, switch to profile B while disarmed (stick command or OSD menu — Betaflight 4.5 has no in-flight switch for PID profiles, only for rate profiles), fly B the same way in the same pack, then upload the log and use 'Compare with' in the Log Lab to put the two sessions side by side: noise floor, D-term noise, step overshoot and the filter delay estimate decide.",
   },
 ];
 
@@ -28,6 +32,8 @@ const tips = [
   "A 30–60 second log is plenty for noise and step-response analysis.",
   "Fly in calm air: wind adds low-frequency noise that muddies the spectrum.",
   "If you see a strong resonance peak, note the frequency — the tuning wizard will notch it out.",
+  "Keep the dynamic notch floor at 100 Hz or above on whoops and micros: below that it removes real control signal (this fleet crashed at 60 Hz / Q 300).",
+  "Log at 2 kHz or better (blackbox_sample_rate 1/2 at 4 kHz PID) so motor harmonics above 500 Hz are visible; 1 kHz logging folds them into the spectrum.",
 ];
 
 export default function GuidePage() {

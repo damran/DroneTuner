@@ -3,7 +3,43 @@
 @tailwind utilities;
 
 @layer base {
+  /* Light palette (default when <html> has no .dark class). */
   :root {
+    --background: 210 20% 98%;
+    --foreground: 222 20% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 20% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 20% 12%;
+    --primary: 190 80% 36%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 214 20% 93%;
+    --secondary-foreground: 222 20% 16%;
+    --muted: 214 20% 94%;
+    --muted-foreground: 218 12% 42%;
+    --accent: 214 24% 91%;
+    --accent-foreground: 222 20% 12%;
+    --destructive: 0 70% 46%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 18% 86%;
+    --input: 214 18% 84%;
+    --ring: 190 80% 36%;
+    --radius: 0.5rem;
+    /* Status + chart tokens (also used by ECharts/uPlot via getComputedStyle). */
+    --success: 152 60% 34%;
+    --warning: 35 90% 40%;
+    --info: 205 85% 42%;
+    --chart-1: 190 80% 36%;
+    --chart-2: 258 70% 52%;
+    --chart-3: 330 70% 50%;
+    --chart-4: 35 90% 45%;
+    --chart-5: 152 60% 36%;
+    --chart-grid: 214 18% 88%;
+    --chart-text: 218 12% 40%;
+  }
+
+  /* Dark palette (the original DroneTuner look). */
+  .dark {
     --background: 222 16% 6%;
     --foreground: 210 20% 96%;
     --card: 222 16% 8%;
@@ -23,7 +59,16 @@
     --border: 220 12% 18%;
     --input: 220 12% 18%;
     --ring: 190 90% 55%;
-    --radius: 0.5rem;
+    --success: 152 60% 52%;
+    --warning: 38 92% 55%;
+    --info: 199 89% 58%;
+    --chart-1: 187 85% 53%;
+    --chart-2: 258 90% 76%;
+    --chart-3: 329 86% 70%;
+    --chart-4: 38 92% 55%;
+    --chart-5: 152 60% 52%;
+    --chart-grid: 220 12% 18%;
+    --chart-text: 215 12% 62%;
   }
 
   * {

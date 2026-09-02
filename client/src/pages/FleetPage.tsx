@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Plus } from "lucide-react";
 import type { DroneSummary } from "@dronetuner/shared";
-import { SIZE_CLASSES } from "@dronetuner/shared";
+import { SIZE_CLASSES, VIDEO_SYSTEMS, VIDEO_SYSTEM_LABELS } from "@dronetuner/shared";
 import { apiGet, apiPost, photoUrl } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -36,10 +36,11 @@ export default function FleetPage() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [sizeClass, setSizeClass] = useState("65mm");
+  const [videoSystem, setVideoSystem] = useState<string>("analog");
   const [notes, setNotes] = useState("");
 
   const create = useMutation({
-    mutationFn: () => apiPost("/api/drones", { name, sizeClass, notes: notes || null }),
+    mutationFn: () => apiPost("/api/drones", { name, sizeClass, videoSystem, notes: notes || null }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["drones"] });
       setOpen(false);
@@ -92,7 +93,10 @@ export default function FleetPage() {
               <CardContent className="p-4">
                 <div className="flex items-center justify-between">
                   <h3 className="font-medium">{d.name}</h3>
-                  <span className="text-xs text-muted-foreground">{d.sizeClass}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {d.sizeClass}
+                    {d.videoSystem ? ` · ${d.videoSystem === "hd" ? "HD" : "analog"}` : ""}
+                  </span>
                 </div>
                 <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
                   <div>Last flight: {formatDate(d.lastFlightDate)}</div>
@@ -131,6 +135,22 @@ export default function FleetPage() {
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="space-y-1">
+              <Label>Video system</Label>
+              <Select value={videoSystem} onValueChange={setVideoSystem}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {VIDEO_SYSTEMS.map((v) => (
+                    <SelectItem key={v} value={v}>
+                      {VIDEO_SYSTEM_LABELS[v]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">HD air units add mass; templates and vendor baselines are matched on this.</p>
             </div>
             <div className="space-y-1">
               <Label>Notes</Label>

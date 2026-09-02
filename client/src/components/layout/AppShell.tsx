@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
-import { BookOpen, MessageSquare, Plane, Radio, SlidersHorizontal, Wand2 } from "lucide-react";
+import { BookOpen, MessageSquare, Moon, Plane, Radio, SlidersHorizontal, Sun, Wand2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/lib/ui-store";
+import { Switch } from "@/components/ui/switch";
 import ChatDrawer from "../chat/ChatDrawer";
 import ApplyFlow from "../ApplyFlow";
 
@@ -16,6 +18,7 @@ const nav = [
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const [chatOpen, setChatOpen] = useState(false);
   const location = useLocation();
+  const { mode, theme, setMode, setTheme } = useUiStore();
   // Give the copilot drone context when a drone page is open.
   const droneMatch = /^\/drones\/(\d+)/.exec(location.pathname);
   const droneId = droneMatch ? Number(droneMatch[1]) : null;
@@ -47,7 +50,26 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             </NavLink>
           ))}
         </nav>
-        <div className="border-t p-2">
+        <div className="space-y-1 border-t p-2">
+          <label className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-accent/50">
+            <span className="flex items-center gap-2">
+              <SlidersHorizontal className="h-4 w-4" />
+              Advanced mode
+            </span>
+            <Switch
+              checked={mode === "advanced"}
+              onCheckedChange={(on) => setMode(on ? "advanced" : "simple")}
+              aria-label="Toggle advanced mode"
+            />
+          </label>
+          <button
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+            aria-label="Toggle light or dark theme"
+          >
+            {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            {theme === "dark" ? "Light theme" : "Dark theme"}
+          </button>
           <button
             onClick={() => setChatOpen(true)}
             className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground"

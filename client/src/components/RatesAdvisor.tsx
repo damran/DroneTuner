@@ -21,6 +21,7 @@ import {
   type RatesStyle,
 } from "@dronetuner/shared/tuning";
 import { EChart } from "@/components/charts/EChart";
+import { useChartTheme, type ChartTheme } from "@/lib/chart-theme";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -70,6 +71,7 @@ export default function RatesAdvisor({
   sizeClass: string;
   initialStyle?: string | null;
 }) {
+  const chartTheme = useChartTheme();
   const [style, setStyle] = useState<RatesStyle>(isRatesStyle(initialStyle) ? initialStyle : "freestyle");
   const [axisTab, setAxisTab] = useState<Axis>("roll");
   const [copied, setCopied] = useState(false);
@@ -133,12 +135,12 @@ export default function RatesAdvisor({
               return (
                 <div key={axis}>
                   <div className="mb-1 text-xs font-medium">{AXIS_LABELS[axis]}</div>
-                  <EChart option={buildHistogramOption(u, usage.binWidthDegS, currentFor(axis).max)} height={180} />
+                  <EChart option={buildHistogramOption(u, usage.binWidthDegS, currentFor(axis).max, chartTheme)} height={180} />
                   <div className="mt-1 text-xs text-muted-foreground">
                     {ZONE_ORDER.map((z) => `${ZONE_LABELS[z].split(" (")[0]} ${Math.round(u.zones[z] * 100)}%`).join(" · ")}
                   </div>
                   {u.highDeflectionTracking !== null && u.highDeflectionTracking < 0.9 && u.achievedP99DegS !== null && (
-                    <div className="mt-1 text-xs text-amber-500">
+                    <div className="mt-1 text-xs text-warning">
                       Commanded max ~{Math.round(currentFor(axis).max)} °/s, physically reaches ~
                       {Math.round(u.achievedP99DegS)} °/s ({Math.round(u.highDeflectionTracking * 100)}% tracking).
                     </div>
@@ -168,7 +170,7 @@ export default function RatesAdvisor({
               }
             }
             return notes.map((n) => (
-              <p key={n} className="text-xs text-amber-500">
+              <p key={n} className="text-xs text-warning">
                 {n}
               </p>
             ));
@@ -222,7 +224,7 @@ export default function RatesAdvisor({
             </ul>
           )}
           {rec.warnings.length > 0 && (
-            <ul className="list-disc space-y-1 pl-5 text-xs text-amber-500">
+            <ul className="list-disc space-y-1 pl-5 text-xs text-warning">
               {rec.warnings.map((w) => (
                 <li key={w}>{w}</li>
               ))}
@@ -246,7 +248,7 @@ export default function RatesAdvisor({
         </CardHeader>
         <CardContent className="space-y-4 p-4 pt-0">
           <EChart
-            option={buildCurveOption(currentFor(axisTab), recFor(axisTab), usageFor(axisTab))}
+            option={buildCurveOption(currentFor(axisTab), recFor(axisTab), usageFor(axisTab), chartTheme)}
             height={260}
           />
           <div>
@@ -308,7 +310,7 @@ function RateCell({ from, to, digits = 0 }: { from: number; to: number; digits?:
   );
 }
 
-function buildHistogramOption(u: AxisRateUsage, binWidth: number, loggedMax: number) {
+function buildHistogramOption(u: AxisRateUsage, binWidth: number, loggedMax: number, t: ChartTheme) {
   const total = u.histogram.reduce((a, b) => a + b, 0);
   const data: [number, number][] = [];
   for (let b = 0; b < u.histogram.length; b++) {
@@ -318,17 +320,17 @@ function buildHistogramOption(u: AxisRateUsage, binWidth: number, loggedMax: num
   const xMax = Math.min(1250, Math.max(650, Math.ceil(Math.max(u.maxDegS, loggedMax) / 100) * 100 + 50));
 
   const markLineData: { xAxis: number; label: { formatter: string }; lineStyle: { color: string; type: "dashed" | "solid" } }[] = [
-    { xAxis: u.p50, label: { formatter: "p50" }, lineStyle: { color: "#9ca3af", type: "dashed" } },
-    { xAxis: u.p90, label: { formatter: "p90" }, lineStyle: { color: "#9ca3af", type: "dashed" } },
-    { xAxis: u.p99, label: { formatter: "p99" }, lineStyle: { color: "#9ca3af", type: "dashed" } },
+    { xAxis: u.p50, label: { formatter: "p50" }, lineStyle: { color: t.text, type: "dashed" } },
+    { xAxis: u.p90, label: { formatter: "p90" }, lineStyle: { color: t.text, type: "dashed" } },
+    { xAxis: u.p99, label: { formatter: "p99" }, lineStyle: { color: t.text, type: "dashed" } },
   ];
   if (loggedMax > 0 && loggedMax <= xMax) {
-    markLineData.push({ xAxis: loggedMax, label: { formatter: "max" }, lineStyle: { color: "#f472b6", type: "solid" } });
+    markLineData.push({ xAxis: loggedMax, label: { formatter: "max" }, lineStyle: { color: t.series[2], type: "solid" } });
   }
 
   return {
     backgroundColor: "transparent",
-    textStyle: { color: "#9ca3af" },
+    textStyle: { color: t.text },
     tooltip: {
       trigger: "axis" as const,
       formatter: (params: unknown) => {
@@ -344,16 +346,16 @@ function buildHistogramOption(u: AxisRateUsage, binWidth: number, loggedMax: num
       min: 0,
       max: xMax,
       name: "°/s",
-      nameTextStyle: { color: "#9ca3af" },
-      axisLabel: { color: "#9ca3af" },
+      nameTextStyle: { color: t.text },
+      axisLabel: { color: t.text },
     },
-    yAxis: { type: "value" as const, axisLabel: { color: "#9ca3af", formatter: "{value}%" } },
+    yAxis: { type: "value" as const, axisLabel: { color: t.text, formatter: "{value}%" } },
     series: [
       {
         type: "bar" as const,
         data,
         barWidth: "70%",
-        itemStyle: { color: "#22d3ee" },
+        itemStyle: { color: t.series[0] },
         markArea: {
           silent: true,
           data: ZONE_ORDER.map(
@@ -369,7 +371,7 @@ function buildHistogramOption(u: AxisRateUsage, binWidth: number, loggedMax: num
   };
 }
 
-function buildCurveOption(current: AxisRates, rec: AxisRatesRecommendation, u: AxisRateUsage | undefined) {
+function buildCurveOption(current: AxisRates, rec: AxisRatesRecommendation, u: AxisRateUsage | undefined, t: ChartTheme) {
   const yMax = Math.ceil(Math.max(current.max, rec.max) / 200) * 200 + 100;
   const currentPts = rateCurvePoints(current.center, current.max, current.expo);
   const recPts = rateCurvePoints(rec.center, rec.max, rec.expo);
@@ -400,8 +402,8 @@ function buildCurveOption(current: AxisRates, rec: AxisRatesRecommendation, u: A
       type: "line",
       data: currentPts,
       showSymbol: false,
-      lineStyle: { color: "#9ca3af", type: "dashed" },
-      itemStyle: { color: "#9ca3af" },
+      lineStyle: { color: t.text, type: "dashed" },
+      itemStyle: { color: t.text },
       markArea: { silent: true, data: bendArea },
     },
     {
@@ -409,8 +411,8 @@ function buildCurveOption(current: AxisRates, rec: AxisRatesRecommendation, u: A
       type: "line",
       data: recPts,
       showSymbol: false,
-      lineStyle: { color: "#22d3ee" },
-      itemStyle: { color: "#22d3ee" },
+      lineStyle: { color: t.series[0] },
+      itemStyle: { color: t.series[0] },
       markArea: {
         silent: true,
         data: ZONE_ORDER.map((z) => [
@@ -426,31 +428,31 @@ function buildCurveOption(current: AxisRates, rec: AxisRatesRecommendation, u: A
       type: "scatter",
       data: usagePts,
       symbolSize: 8,
-      itemStyle: { color: "#f472b6" },
+      itemStyle: { color: t.series[2] },
     });
   }
 
   return {
     backgroundColor: "transparent",
-    textStyle: { color: "#9ca3af" },
+    textStyle: { color: t.text },
     tooltip: { trigger: "axis" as const },
-    legend: { textStyle: { color: "#9ca3af" }, data: series.map((s) => s.name as string) },
+    legend: { textStyle: { color: t.text }, data: series.map((s) => s.name as string) },
     grid: { left: 50, right: 20, top: 30, bottom: 30 },
     xAxis: {
       type: "value" as const,
       min: 0,
       max: 100,
       name: "stick %",
-      nameTextStyle: { color: "#9ca3af" },
-      axisLabel: { color: "#9ca3af" },
+      nameTextStyle: { color: t.text },
+      axisLabel: { color: t.text },
     },
     yAxis: {
       type: "value" as const,
       min: 0,
       max: yMax,
       name: "°/s",
-      nameTextStyle: { color: "#9ca3af" },
-      axisLabel: { color: "#9ca3af" },
+      nameTextStyle: { color: t.text },
+      axisLabel: { color: t.text },
     },
     series,
   };

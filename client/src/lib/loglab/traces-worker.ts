@@ -5,6 +5,7 @@
  * the main thread and posts back plain, chart-ready arrays.
  */
 import { parseBlackboxLog } from "@dronetuner/shared/blackbox";
+import type { PeakKind } from "@dronetuner/shared/analysis";
 import {
   airborneMask,
   averageStepResponse,
@@ -35,7 +36,7 @@ export interface StepSeries {
 
 export interface SpectrumPeak {
   freqHz: number;
-  kind: "frameResonance" | "motorHarmonic" | "unknown";
+  kind: PeakKind;
 }
 
 export interface SpectrumSeries {
@@ -60,7 +61,7 @@ export type WorkerOut =
   | { type: "error"; message: string };
 
 const ctx = self as unknown as {
-  onmessage: ((e: MessageEvent<{ buffer: ArrayBuffer; maxFrames: number }>) => void) | null;
+  onmessage: ((e: MessageEvent<{ buffer: ArrayBuffer; maxFrames: number; sessionIndex: number }>) => void) | null;
   postMessage: (msg: WorkerOut, transfer?: Transferable[]) => void;
 };
 
@@ -113,7 +114,10 @@ function medianDt(timeUs: Float32Array): number {
 ctx.onmessage = (e) => {
   try {
     ctx.postMessage({ type: "progress", stage: "Parsing log…" });
-    const parsed = parseBlackboxLog(new Uint8Array(e.data.buffer), { maxFrames: e.data.maxFrames });
+    const parsed = parseBlackboxLog(new Uint8Array(e.data.buffer), {
+      maxFrames: e.data.maxFrames,
+      sessionIndex: e.data.sessionIndex,
+    });
 
     ctx.postMessage({ type: "progress", stage: "Computing traces…" });
     const sampleRate = 1e6 / medianDt(parsed.timeUs);

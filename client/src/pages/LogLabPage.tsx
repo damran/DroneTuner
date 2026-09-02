@@ -276,9 +276,10 @@ export default function LogLabPage() {
                 <button
                   key={l.id}
                   onClick={() => setSelectedLog(l.id)}
-                  className={`w-full rounded-md px-3 py-2 text-left text-sm transition-colors ${
+                  className={`w-full rounded-md px-3 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                     selectedLog === l.id ? "bg-accent" : "hover:bg-accent/50"
                   }`}
+                  aria-current={selectedLog === l.id ? "true" : undefined}
                 >
                   <div className="flex items-center gap-2">
                     <span className="truncate font-medium" title={l.originalName ?? undefined}>

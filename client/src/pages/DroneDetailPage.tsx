@@ -30,14 +30,26 @@ export default function DroneDetailPage() {
   const droneId = Number(id);
   const validId = Number.isInteger(droneId) && droneId > 0;
   const qc = useQueryClient();
-  const { data: drone, isLoading } = useQuery({
+  const { data: drone, isLoading, isError, error } = useQuery({
     queryKey: ["drone", droneId],
     enabled: validId,
     queryFn: () => apiGet<DroneDetail>(`/api/drones/${droneId}`),
+    retry: false,
   });
 
-  if (!validId) {
-    return <p className="text-sm text-muted-foreground">Drone not found.</p>;
+  if (!validId || isError || (!isLoading && !drone)) {
+    return (
+      <Card>
+        <CardContent className="space-y-2 p-8 text-center">
+          <p className="text-sm text-muted-foreground">
+            {isError ? `This drone could not be loaded (${(error as Error).message}).` : "Drone not found."}
+          </p>
+          <Link to="/" className="text-sm text-primary underline">
+            Back to the fleet
+          </Link>
+        </CardContent>
+      </Card>
+    );
   }
 
   if (isLoading || !drone) {
@@ -90,6 +102,7 @@ export default function DroneDetailPage() {
         </TabsList>
 
         <TabsContent value="overview">
+          <OverviewStrip drone={drone} />
           <BomTable droneId={droneId} components={drone.components} />
           {drone.notes && (
             <Card className="mt-4">
@@ -133,6 +146,33 @@ export default function DroneDetailPage() {
         </TabsContent>
       </Tabs>
     </div>
+  );
+}
+
+/** The numbers a pilot wants first: what it is, how much it has flown, what it flies with. */
+function OverviewStrip({ drone }: { drone: DroneDetail }) {
+  const lastFlight = drone.flights.reduce<number | null>((max, f) => (max === null || f.date > max ? f.date : max), null);
+  const latestProfile = [...drone.profiles].sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+  const fc = [drone.fcCraftName, drone.fcTarget ?? drone.fcBoard].filter(Boolean).join(" · ");
+  const tiles: [string, string][] = [
+    ["Class", `${drone.sizeClass}${drone.videoSystem ? ` · ${drone.videoSystem === "hd" ? "HD" : "analog"}` : ""}`],
+    ["Flights", String(drone.flights.length)],
+    ["Logs", String(drone.logs.length)],
+    ["Last flight", lastFlight ? formatDate(lastFlight) : "—"],
+    ["Latest profile", latestProfile ? latestProfile.name : "—"],
+    ["Flight controller", fc || "not connected yet"],
+  ];
+  return (
+    <dl className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      {tiles.map(([label, value]) => (
+        <div key={label} className="rounded-lg border bg-card p-3">
+          <dt className="text-xs text-muted-foreground">{label}</dt>
+          <dd className="mt-1 truncate text-sm font-medium" title={value}>
+            {value}
+          </dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 

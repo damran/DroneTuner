@@ -6,6 +6,7 @@ import type { DroneSummary } from "@dronetuner/shared";
 import { SIZE_CLASSES, VIDEO_SYSTEMS, VIDEO_SYSTEM_LABELS } from "@dronetuner/shared";
 import { apiGet, apiPost, photoUrl } from "@/lib/api";
 import { formatDate } from "@/lib/format";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -79,8 +80,12 @@ export default function FleetPage() {
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {drones?.map((d) => (
-          <Link key={d.id} to={`/drones/${d.id}`}>
-            <Card className="overflow-hidden transition-colors hover:border-primary/50">
+          <Link
+            key={d.id}
+            to={`/drones/${d.id}`}
+            className="rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          >
+            <Card className="h-full overflow-hidden transition-colors hover:border-primary/50">
               <div className="aspect-video bg-muted">
                 {d.primaryPhotoPath ? (
                   <img src={photoUrl(d.primaryPhotoPath)} alt={d.name} className="h-full w-full object-cover" />
@@ -91,20 +96,23 @@ export default function FleetPage() {
                 )}
               </div>
               <CardContent className="p-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-medium">{d.name}</h3>
-                  <span className="text-xs text-muted-foreground">
-                    {d.sizeClass}
-                    {d.videoSystem ? ` · ${d.videoSystem === "hd" ? "HD" : "analog"}` : ""}
-                  </span>
+                <h3 className="truncate font-medium" title={d.name}>
+                  {d.name}
+                </h3>
+                <div className="mt-1 flex flex-wrap gap-1">
+                  <Badge variant="secondary">{d.sizeClass}</Badge>
+                  {d.videoSystem && <Badge variant="outline">{d.videoSystem === "hd" ? "HD" : "Analog"}</Badge>}
                 </div>
-                <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
-                  <div>Last flight: {formatDate(d.lastFlightDate)}</div>
-                  <div>
-                    {d.componentCount} components
-                    {d.activeProfileName ? ` · ${d.activeProfileName}` : ""}
-                  </div>
-                </div>
+                <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+                  <dt className="text-muted-foreground">Last flight</dt>
+                  <dd>{d.lastFlightDate ? formatDate(d.lastFlightDate) : "—"}</dd>
+                  <dt className="text-muted-foreground">Build</dt>
+                  <dd>{d.componentCount === 0 ? "no components yet" : `${d.componentCount} component${d.componentCount === 1 ? "" : "s"}`}</dd>
+                  <dt className="text-muted-foreground">Profile</dt>
+                  <dd className="truncate" title={d.activeProfileName ?? undefined}>
+                    {d.activeProfileName ?? "—"}
+                  </dd>
+                </dl>
               </CardContent>
             </Card>
           </Link>

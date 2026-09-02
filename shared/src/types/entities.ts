@@ -299,3 +299,29 @@ export interface DroneBaseline {
   merged: ProfileSettings;
   sources: Record<string, string>;
 }
+
+/** Which Betaflight profile slot an A/B test switches between. */
+export type AbTestKind = "pid" | "rate";
+
+export interface AbTestVariant {
+  side: "A" | "B";
+  /** e.g. "A · Crisp", "B · Centre +30 %" */
+  label: string;
+  /** 0-based PID profile or rate profile slot */
+  slot: number;
+  settings: ProfileSettings;
+}
+
+/**
+ * An in-flight A/B test as written to the FC (or saved for CLI use). Log Lab
+ * fingerprints each flight's headers against the two variants: the D-term
+ * filter chain for kind "pid", the rate curve for kind "rate".
+ */
+export interface AbTest {
+  id: number;
+  droneId: number;
+  kind: AbTestKind;
+  createdAt: number;
+  variants: AbTestVariant[];
+  notes: string | null;
+}

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { Analysis, DroneSummary, FlightLog, Profile, ProfileSettings, TuneGoal } from "@dronetuner/shared";
+import type { AbTestKind, Analysis, DroneSummary, FlightLog, Profile, ProfileSettings, RateSettings, TuneGoal } from "@dronetuner/shared";
 import { TUNE_GOALS, TUNE_GOAL_LABELS } from "@dronetuner/shared";
 import {
   applyChanges,
@@ -8,6 +8,7 @@ import {
   cliOnlyKeys,
   filterDiffKeys,
   formatSettingValue,
+  rateAbVariant,
   runRules,
   settingLabel,
   settingsToCli,
@@ -41,6 +42,12 @@ const AB_PAIRS: [TuneVariant, TuneVariant][] = TUNE_VARIANTS.flatMap((a, i) =>
 );
 
 const shortVariantLabel = (v: TuneVariant): string => TUNE_VARIANT_LABELS[v].split(" (")[0]!;
+
+/** "190 / 190 / 200" style cell for a per-axis rate triple, scaled to display units. */
+function rateTriple(rates: RateSettings, r: keyof RateSettings, p: keyof RateSettings, y: keyof RateSettings, scale: number): string {
+  const fmt = (v: number | undefined) => (v === undefined ? "—" : scale >= 1 ? String(Math.round(v * scale)) : (v * scale).toFixed(2));
+  return `${fmt(rates[r])} / ${fmt(rates[p])} / ${fmt(rates[y])}`;
+}
 
 /**
  * What the two profiles actually differ in, and which filter settings are
@@ -85,6 +92,9 @@ export default function WizardPage() {
   const [abPair, setAbPair] = useState<[TuneVariant, TuneVariant]>(["crisp", "balanced"]);
   const [abSlots, setAbSlots] = useState<[number, number]>([0, 1]);
   const [copiedVariant, setCopiedVariant] = useState<string | null>(null);
+  // Rate-profile A/B (switchable in flight): which two rate profile slots.
+  const [rateSlots, setRateSlots] = useState<[number, number]>([0, 1]);
+  const [pairSaved, setPairSaved] = useState<AbTestKind | null>(null);
 
   const { data: drones } = useQuery({
     queryKey: ["drones"],
@@ -195,6 +205,30 @@ export default function WizardPage() {
     });
   }, [draftSettings, abPair]);
   const profileCount = fcStatus?.pidProfileCount ?? 3;
+
+  // Rate A/B: A = the draft's rates, B = centre sensitivity × 1.3 (ACTUAL only).
+  const rateVariants = useMemo(() => {
+    if (!draftSettings?.rates) return null;
+    const b = rateAbVariant(draftSettings.rates);
+    if (!b) return null;
+    const a = draftSettings.rates;
+    return [
+      { side: "A" as const, label: "A · Rates", rates: a },
+      { side: "B" as const, label: "B · Centre +30 %", rates: b },
+    ];
+  }, [draftSettings]);
+
+  const savePair = async (kind: AbTestKind) => {
+    if (!drone) return;
+    const variants =
+      kind === "pid"
+        ? abVariants?.map((v, i) => ({ side: v.side, label: v.label, slot: abSlots[i]!, settings: v.settings }))
+        : rateVariants?.map((v, i) => ({ side: v.side, label: v.label, slot: rateSlots[i]!, settings: { rates: v.rates } }));
+    if (!variants) return;
+    await apiPost("/api/ab-tests", { droneId: drone.id, kind, variants, notes: "saved from the wizard (CLI write)" });
+    setPairSaved(kind);
+    setTimeout(() => setPairSaved(null), 2500);
+  };
 
   const copyCli = async (lines: string[], done: () => void) => {
     await navigator.clipboard.writeText(lines.join("\n") + "\nsave\n");
@@ -458,7 +492,8 @@ export default function WizardPage() {
                       start({
                         droneId: drone.id,
                         profileName: "A/B",
-                        ab: abVariants.map((v, i) => ({ label: v.label, profile: abSlots[i]!, settings: v.settings })),
+                        abKind: "pid",
+                        ab: abVariants.map((v, i) => ({ side: v.side, label: v.label, profile: abSlots[i]!, settings: v.settings })),
                       });
                     }}
                   >
@@ -480,6 +515,14 @@ export default function WizardPage() {
                       {copiedVariant === v.side ? "Copied" : `Copy CLI for ${v.side}`}
                     </Button>
                   ))}
+                  <Button
+                    variant="ghost"
+                    disabled={abSlots[0] === abSlots[1]}
+                    title="Record this pair so the Log Lab can label each flight A or B (done automatically when written over MSP)"
+                    onClick={() => void savePair("pid")}
+                  >
+                    {pairSaved === "pid" ? "Pair saved" : "Save pair for log labels"}
+                  </Button>
                 </div>
                 {abSlots[0] === abSlots[1] && (
                   <p className="text-xs text-destructive">A and B need two different PID profile slots.</p>
@@ -489,6 +532,133 @@ export default function WizardPage() {
                   switch in flight — use the stick command or the OSD menu → Profiles), fly the same lines again in the same
                   pack. Every arm starts a new blackbox session, so the Log Lab can compare A and B side by side.
                 </p>
+              </CardContent>
+            </Card>
+          )}
+
+          {draftSettings && (
+            <Card>
+              <CardHeader className="p-4">
+                <CardTitle className="text-sm">Rate A/B: centre sensitivity (switchable in flight)</CardTitle>
+                <p className="text-xs text-muted-foreground">
+                  Rate profiles can be switched from a switch mid-flight. A keeps the draft's rates, B raises the centre
+                  sensitivity by 30 % with the same max rate and expo — the twitchy-vs-calm-around-centre feel, nothing else.
+                </p>
+              </CardHeader>
+              <CardContent className="space-y-3 p-4 pt-0">
+                {!rateVariants ? (
+                  <p className="text-xs text-muted-foreground">
+                    Needs ACTUAL rates in the draft (the templates use them); with BETAFLIGHT/RACEFLIGHT/KISS rates the
+                    centre sensitivity is not one knob.
+                  </p>
+                ) : (
+                  <>
+                    <div className="flex flex-wrap items-end gap-3">
+                      {(["A", "B"] as const).map((side, i) => (
+                        <div key={side} className="space-y-1">
+                          <Label>Rate profile slot for {side}</Label>
+                          <Select
+                            value={String(rateSlots[i])}
+                            onValueChange={(v) => {
+                              const next: [number, number] = [...rateSlots] as [number, number];
+                              next[i] = Number(v);
+                              setRateSlots(next);
+                            }}
+                          >
+                            <SelectTrigger className="w-36">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {[0, 1, 2, 3].map((n) => (
+                                <SelectItem key={n} value={String(n)}>
+                                  Rate profile {n + 1}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      ))}
+                    </div>
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Variant</TableHead>
+                          <TableHead>Centre (deg/s) R / P / Y</TableHead>
+                          <TableHead>Max (deg/s) R / P / Y</TableHead>
+                          <TableHead>Expo R / P / Y</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {rateVariants.map((v) => (
+                          <TableRow key={v.side}>
+                            <TableCell className="font-medium">{v.label}</TableCell>
+                            <TableCell>{rateTriple(v.rates, "rcRate", "rcRatePitch", "rcRateYaw", 10)}</TableCell>
+                            <TableCell>{rateTriple(v.rates, "rollRate", "pitchRate", "yawRate", 10)}</TableCell>
+                            <TableCell>{rateTriple(v.rates, "rcExpo", "rcExpoPitch", "rcExpoYaw", 0.01)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        disabled={rateSlots[0] === rateSlots[1]}
+                        onClick={() => {
+                          if (!drone) return;
+                          start({
+                            droneId: drone.id,
+                            profileName: "Rate A/B",
+                            abKind: "rate",
+                            ab: rateVariants.map((v, i) => ({
+                              side: v.side,
+                              label: v.label,
+                              profile: rateSlots[i]!,
+                              settings: { rates: v.rates },
+                            })),
+                          });
+                        }}
+                      >
+                        Write rate A and B to the FC
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() =>
+                          void navigator.clipboard
+                            .writeText(
+                              [
+                                ...rateVariants.flatMap((v, i) => [`rateprofile ${rateSlots[i]}`, ...settingsToCli({ rates: v.rates })]),
+                                `rateprofile ${rateSlots[0]}`,
+                                "save",
+                                "",
+                              ].join("\n"),
+                            )
+                            .then(() => {
+                              setCopiedVariant("rates");
+                              setTimeout(() => setCopiedVariant(null), 2000);
+                            })
+                        }
+                      >
+                        {copiedVariant === "rates" ? "Copied" : "Copy CLI for both"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        disabled={rateSlots[0] === rateSlots[1]}
+                        title="Record this pair so the Log Lab can label each flight A or B (done automatically when written over MSP)"
+                        onClick={() => void savePair("rate")}
+                      >
+                        {pairSaved === "rate" ? "Pair saved" : "Save pair for log labels"}
+                      </Button>
+                    </div>
+                    {rateSlots[0] === rateSlots[1] && (
+                      <p className="text-xs text-destructive">A and B need two different rate profile slots.</p>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      In flight: put "Rate Profile Selection" (adjustment function 12) on a 3-position switch in Configurator →
+                      Adjustments, or CLI <code>adjrange 0 0 &lt;aux&gt; 900 2100 12 &lt;aux&gt; 0 0</code>; low = rate profile 1,
+                      middle = 2, high = 3. Fly A, land and disarm, flip, arm and fly B — one blackbox session each, labelled
+                      A/B in the Log Lab.
+                    </p>
+                  </>
+                )}
               </CardContent>
             </Card>
           )}

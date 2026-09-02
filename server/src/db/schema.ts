@@ -135,6 +135,23 @@ export const vendorPresets = sqliteTable("vendor_presets", {
   notes: text("notes"),
 });
 
+/**
+ * One in-flight A/B test: two variants written to two PID profiles (kind
+ * "pid", D-term chain differs) or two rate profiles (kind "rate", centre
+ * sensitivity differs). Log Lab matches each flight's headers against the
+ * variants to label the session "A · Crisp" / "B · Smooth".
+ */
+export const abTests = sqliteTable("ab_tests", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  droneId: integer("drone_id")
+    .notNull()
+    .references(() => drones.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull().default("pid"),
+  createdAt: integer("created_at").notNull(),
+  variantsJson: text("variants_json", { mode: "json" }).notNull().default("[]"),
+  notes: text("notes"),
+});
+
 export const chatMessages = sqliteTable("chat_messages", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   droneId: integer("drone_id").references(() => drones.id, { onDelete: "set null" }),

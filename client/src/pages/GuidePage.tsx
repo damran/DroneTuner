@@ -23,7 +23,11 @@ const steps = [
   },
   {
     title: "6. A/B test crisp vs smooth in one pack",
-    body: "In the Tuning Wizard, 'Compare in flight' writes two versions of your draft into two PID profiles: same PIDs, feedforward and rates, only the D-term filter chain differs. Fly A for 30 s with a few sharp moves and throttle chops, land, switch to profile B while disarmed (stick command or OSD menu — Betaflight 4.5 has no in-flight switch for PID profiles, only for rate profiles), fly B the same way in the same pack, then upload the log and use 'Compare with' in the Log Lab to put the two sessions side by side: noise floor, D-term noise, step overshoot and the filter delay estimate decide.",
+    body: "In the Tuning Wizard, 'Compare in flight' writes two versions of your draft into two PID profiles: same PIDs, feedforward and rates, only the D-term filter chain differs. Fly A for 30 s with a few sharp moves and throttle chops, land, switch to profile B while disarmed (stick command: throttle down + yaw left, then roll left = profile 1, pitch up = profile 2, roll right = profile 3; or the OSD menu — Betaflight 4.5 has no in-flight switch for PID profiles, only for rate profiles), fly B the same way in the same pack, then upload the log. The Log Lab labels each session A or B from its headers, and 'Compare with' puts the two side by side: noise floor, D-term noise, step overshoot and the filter delay estimate decide.",
+  },
+  {
+    title: "7. A/B the rates in flight",
+    body: "The wizard's rate A/B writes the draft's rates into one rate profile and the same rates with 30 % more centre sensitivity into another. Rate profiles do switch in flight: put 'Rate Profile Selection' (adjustment function 12) on a 3-position switch in Configurator → Adjustments, or in the CLI: adjrange 0 0 <aux> 900 2100 12 <aux> 0 0 (switch low = rate profile 1, middle = 2, high = 3). Fly A, land and disarm, flip the switch, arm and fly B, so each side is its own blackbox session and gets its A/B label.",
   },
 ];
 

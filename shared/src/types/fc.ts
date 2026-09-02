@@ -170,6 +170,8 @@ export interface FcDump {
    * (= whatever profile is active).
    */
   pidProfile?: number;
+  /** Rate profile the MSP_RC_TUNING section was read from (0-based); restore selects it before replay. */
+  rateProfile?: number;
 }
 
 /**

@@ -251,6 +251,29 @@ describe("api", () => {
     expect(del.statusCode).toBe(204);
   });
 
+  it("stores and lists A/B tests per drone and refuses identical slots", async () => {
+    const drone = await app.inject({ method: "POST", url: "/api/drones", payload: { name: "AB Whoop", sizeClass: "65mm" } });
+    const droneId = drone.json().id as number;
+    const variants = [
+      { side: "A", label: "A · Crisp", slot: 0, settings: { filters: { dtermLowpass2Hz: 150 } } },
+      { side: "B", label: "B · Smooth", slot: 1, settings: { filters: { dtermLowpass2Hz: 96 } } },
+    ];
+    const created = await app.inject({ method: "POST", url: "/api/ab-tests", payload: { droneId, kind: "pid", variants } });
+    expect(created.statusCode).toBe(200);
+    expect(created.json().variants[1].label).toBe("B · Smooth");
+    const same = await app.inject({
+      method: "POST",
+      url: "/api/ab-tests",
+      payload: { droneId, kind: "rate", variants: [variants[0], { ...variants[1], slot: 0 }] },
+    });
+    expect(same.statusCode).toBe(400);
+    const list = await app.inject({ method: "GET", url: `/api/ab-tests?droneId=${droneId}` });
+    expect(list.json()).toHaveLength(1);
+    expect(list.json()[0].kind).toBe("pid");
+    const del = await app.inject({ method: "DELETE", url: `/api/ab-tests/${created.json().id}` });
+    expect(del.statusCode).toBe(204);
+  });
+
   it("seeds the vendor catalogue idempotently with parsed settings and source URLs", async () => {
     const first = await runSeed(db);
     expect(first.vendorInserted).toBeGreaterThan(50);

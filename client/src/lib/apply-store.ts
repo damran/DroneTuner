@@ -4,9 +4,10 @@ import { partitionCliOnly } from "@dronetuner/shared/tuning";
 
 /** One side of an in-flight A/B test: a full settings set for one PID profile slot. */
 export interface AbVariantPayload {
+  side: "A" | "B";
   /** e.g. "A · Crisp" */
   label: string;
-  /** 0-based PID profile slot to write into */
+  /** 0-based PID profile (kind "pid") or rate profile (kind "rate") slot to write into */
   profile: number;
   settings: ProfileSettings;
   cliOnlyStripped?: string[];
@@ -25,6 +26,8 @@ export interface ApplyPayload {
    * slot first), then leave profile A active. Mutually exclusive with `settings`.
    */
   ab?: AbVariantPayload[];
+  /** Which profile slots the A/B switches: PID profiles (default) or rate profiles. */
+  abKind?: "pid" | "rate";
 }
 
 interface ApplyState {

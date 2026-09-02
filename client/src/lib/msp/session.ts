@@ -72,7 +72,16 @@ interface MspStore {
    * save, exactly like Configurator's profile dropdown.
    */
   selectPidProfile: (index: number) => Promise<void>;
+  /**
+   * Make rate profile `index` active (MSP_SELECT_SETTING with the
+   * RATEPROFILE_MASK bit). Betaflight itself allows this while armed (that is
+   * how an adjustment switch works); DroneTuner never sends it armed.
+   */
+  selectRateProfile: (index: number) => Promise<void>;
 }
+
+/** Betaflight 4.x CONTROL_RATE_PROFILE_COUNT (MSP_STATUS_EX does not report it). */
+export const RATE_PROFILE_COUNT = 4;
 
 const serial = new MspSerial();
 let rawPayloads = new Map<number, Uint8Array>();
@@ -223,6 +232,7 @@ export const useMspStore = create<MspStore>((set, get) => {
       sections,
       decoded: config,
       pidProfile: status?.pidProfile,
+      rateProfile: status?.rateProfile,
     };
   },
 
@@ -285,6 +295,21 @@ export const useMspStore = create<MspStore>((set, get) => {
     }
   },
 
+  selectRateProfile: async (index: number) => {
+    const { config } = get();
+    if (!config) throw new Error("Not connected to a flight controller");
+    await assertDisarmed("switch rate profiles");
+    if (!Number.isInteger(index) || index < 0 || index >= RATE_PROFILE_COUNT) {
+      throw new Error(`Rate profile ${index + 1} does not exist (Betaflight has ${RATE_PROFILE_COUNT})`);
+    }
+    await serial.query(MSP_SELECT_SETTING, new Uint8Array([(RATEPROFILE_MASK | index) & 0xff]));
+    await get().refresh();
+    const after = get().status;
+    if (after && after.rateProfile !== index) {
+      throw new Error(`FC did not switch to rate profile ${index + 1} (still on ${after.rateProfile + 1})`);
+    }
+  },
+
   restore: async (dump: FcDump) => {
     const { info, writable } = get();
     if (!writable) throw new Error("Writes are disabled for this firmware version (read-only mode)");
@@ -305,6 +330,10 @@ export const useMspStore = create<MspStore>((set, get) => {
     const current = get().status?.pidProfile;
     if (dump.pidProfile !== undefined && current !== undefined && dump.pidProfile !== current) {
       await get().selectPidProfile(dump.pidProfile);
+    }
+    const currentRate = get().status?.rateProfile;
+    if (dump.rateProfile !== undefined && currentRate !== undefined && dump.rateProfile !== currentRate) {
+      await get().selectRateProfile(dump.rateProfile);
     }
     // Replay is limited to the four tuning SET commands, no matter where the
     // dump came from — a stored row must never become a way to send arming,

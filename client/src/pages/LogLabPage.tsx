@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { FileUp, Loader2 } from "lucide-react";
-import type { Analysis, DroneSummary, Flight, FlightLog, LogUploadResult } from "@dronetuner/shared";
+import type { AbTest, Analysis, DroneSummary, Flight, FlightLog, LogUploadResult } from "@dronetuner/shared";
 import { compareAnalyses, type AnalysisComparison } from "@dronetuner/shared/analysis";
+import { matchAbTest } from "@dronetuner/shared/tuning";
 import type { SpectrumSeries, TracesResult, WorkerOut } from "@/lib/loglab/traces-worker";
 import { apiGet, apiPost } from "@/lib/api";
 import {
@@ -21,6 +22,7 @@ import { useAdvanced } from "@/lib/ui-store";
 import { UplotChart } from "@/components/charts/UplotChart";
 import FindingsPanel from "@/components/FindingsPanel";
 import RatesAdvisor from "@/components/RatesAdvisor";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -115,6 +117,23 @@ export default function LogLabPage() {
 
   const drone = drones?.find((d) => String(d.id) === droneId);
   const flightForLog = flights?.find((f) => f.logId === selectedLog);
+
+  // A/B tests written for this drone: each flight's headers are matched
+  // against the two variants (D-term chain or rate curve) for an A/B badge.
+  const { data: abTests } = useQuery({
+    queryKey: ["ab-tests", droneId],
+    enabled: !!droneId,
+    queryFn: () => apiGet<AbTest[]>(`/api/ab-tests?droneId=${droneId}`),
+  });
+  const abLabels = useMemo(() => {
+    const out = new Map<number, string>();
+    if (!logs || !abTests || abTests.length === 0) return out;
+    for (const l of logs) {
+      const m = matchAbTest(l.headers ?? {}, abTests);
+      if (m) out.set(l.id, m.label);
+    }
+    return out;
+  }, [logs, abTests]);
 
   // Comparison partner: by default the previous flight of the same drone
   // (logs arrive newest-first); for an A/B test the pilot picks the other
@@ -261,8 +280,15 @@ export default function LogLabPage() {
                     selectedLog === l.id ? "bg-accent" : "hover:bg-accent/50"
                   }`}
                 >
-                  <div className="truncate font-medium" title={l.originalName ?? undefined}>
-                    {formatLogName(l.originalName) ?? formatDate(l.uploadedAt)}
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-medium" title={l.originalName ?? undefined}>
+                      {formatLogName(l.originalName) ?? formatDate(l.uploadedAt)}
+                    </span>
+                    {abLabels.get(l.id) && (
+                      <Badge variant={abLabels.get(l.id)!.startsWith("A") ? "info" : "success"} className="shrink-0">
+                        {abLabels.get(l.id)}
+                      </Badge>
+                    )}
                   </div>
                   <div className="text-xs text-muted-foreground">
                     {[formatSession(l.sessionIndex, l.sessionCount), l.durationS != null ? formatDuration(l.durationS) : null, formatDateTime(l.recordedAt ?? l.uploadedAt)]
@@ -360,7 +386,11 @@ export default function LogLabPage() {
           )}
 
           {comparison && previousLog && (
-            <ComparisonCard comparison={comparison} previousLog={previousLog} />
+            <ComparisonCard
+              comparison={comparison}
+              previousLog={previousLog}
+              labels={{ current: abLabels.get(selectedLog!) ?? null, previous: abLabels.get(previousLog.id) ?? null }}
+            />
           )}
 
           {traceError && (
@@ -642,16 +672,34 @@ function NoiseSourcesCard({ analysis }: { analysis: Analysis }) {
 function ComparisonCard({
   comparison,
   previousLog,
+  labels,
 }: {
   comparison: AnalysisComparison;
   previousLog: FlightLog;
+  /** A/B labels of the selected and the partner flight, when they belong to a recorded A/B test */
+  labels?: { current: string | null; previous: string | null };
 }) {
+  const isAb = !!labels?.current && !!labels?.previous;
   return (
     <Card>
       <CardHeader className="p-4">
         <CardTitle className="text-sm">
-          vs previous flight ({formatSession(previousLog.sessionIndex, previousLog.sessionCount) ?? formatLogName(previousLog.originalName) ?? formatDate(previousLog.uploadedAt)}
-          {previousLog.recordedAt ? `, ${formatDateTime(previousLog.recordedAt)}` : ""})
+          {isAb ? (
+            <span className="flex flex-wrap items-center gap-2">
+              <Badge variant={labels!.current!.startsWith("A") ? "info" : "success"}>{labels!.current}</Badge>
+              <span>vs</span>
+              <Badge variant={labels!.previous!.startsWith("A") ? "info" : "success"}>{labels!.previous}</Badge>
+              <span className="font-normal text-muted-foreground">
+                ({formatSession(previousLog.sessionIndex, previousLog.sessionCount) ?? formatLogName(previousLog.originalName) ?? formatDate(previousLog.uploadedAt)}
+                {previousLog.recordedAt ? `, ${formatDateTime(previousLog.recordedAt)}` : ""})
+              </span>
+            </span>
+          ) : (
+            <>
+              vs previous flight ({formatSession(previousLog.sessionIndex, previousLog.sessionCount) ?? formatLogName(previousLog.originalName) ?? formatDate(previousLog.uploadedAt)}
+              {previousLog.recordedAt ? `, ${formatDateTime(previousLog.recordedAt)}` : ""})
+            </>
+          )}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4 p-4 pt-0">

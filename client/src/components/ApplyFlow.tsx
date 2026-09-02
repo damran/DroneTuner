@@ -44,6 +44,9 @@ export default function ApplyFlow() {
   /** An A/B write stopped part-way: the FC may hold a half-written, unsaved slot. */
   const [abWriteFailed, setAbWriteFailed] = useState(false);
   const isAb = !!payload?.ab && payload.ab.length > 0;
+  const abKind = payload?.abKind ?? "pid";
+  const slotName = abKind === "rate" ? "rate profile" : "PID profile";
+  const selectSlot = (index: number) => (abKind === "rate" ? msp.selectRateProfile(index) : msp.selectPidProfile(index));
 
   const profileQuery = useQuery({
     queryKey: ["profile", payload?.profileId],
@@ -92,12 +95,12 @@ export default function ApplyFlow() {
     try {
       const plans: AbPlan[] = [];
       for (const v of payload.ab) {
-        setProgress(`Reading PID profile ${v.profile + 1} (${v.label})…`);
-        await msp.selectPidProfile(v.profile);
+        setProgress(`Reading ${slotName} ${v.profile + 1} (${v.label})…`);
+        await selectSlot(v.profile);
         const cfg = useMspStore.getState().config;
         const dump = useMspStore.getState().takeSnapshot();
         if (!cfg || !dump) throw new Error("Could not capture a snapshot");
-        await apiPost("/api/snapshots", { droneId: payload.droneId, dump, reason: `ab-flow profile ${v.profile + 1}` });
+        await apiPost("/api/snapshots", { droneId: payload.droneId, dump, reason: `ab-flow ${slotName} ${v.profile + 1}` });
         const result = diffConfig(cfg, translateSettingsForApi(v.settings, cfg.apiVersion));
         plans.push({ ...v, snapshot: dump, diff: result.diff, sections: result.sections });
       }
@@ -118,14 +121,25 @@ export default function ApplyFlow() {
     setStep("apply");
     try {
       for (const plan of abPlans) {
-        setProgress(`Writing ${plan.label} into PID profile ${plan.profile + 1}…`);
-        await msp.selectPidProfile(plan.profile);
+        setProgress(`Writing ${plan.label} into ${slotName} ${plan.profile + 1}…`);
+        await selectSlot(plan.profile);
         if (plan.sections.length > 0) await msp.applySections(plan.sections, plan.settings);
       }
       // Leave the pilot on A, then persist everything (incl. the selection).
       setProgress("Selecting profile A and saving to EEPROM…");
-      await msp.selectPidProfile(abPlans[0]!.profile);
+      await selectSlot(abPlans[0]!.profile);
       await msp.saveEeprom();
+      // Remember the pair so Log Lab can label each session A or B.
+      if (payload) {
+        await apiPost("/api/ab-tests", {
+          droneId: payload.droneId,
+          kind: abKind,
+          variants: payload.ab!.map((v) => ({ side: v.side, label: v.label, slot: v.profile, settings: v.settings })),
+          notes: `written via MSP ${new Date().toISOString()}`,
+        }).catch(() => {
+          /* the FC write succeeded; the label record is a convenience */
+        });
+      }
       setStep("done");
     } catch (e) {
       // The FC may now sit on a partially written, unsaved slot. Go back to
@@ -134,7 +148,7 @@ export default function ApplyFlow() {
       const stage = progress ?? "an unknown step";
       let note = "";
       try {
-        await msp.selectPidProfile(abPlans[0]!.profile);
+        await selectSlot(abPlans[0]!.profile);
       } catch {
         note = " Re-selecting profile A also failed.";
       }
@@ -233,10 +247,10 @@ export default function ApplyFlow() {
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{isAb ? "Write A/B profiles" : `Apply ${payload?.profileName ?? "tuning changes"}`}</DialogTitle>
+          <DialogTitle>{isAb ? `Write A/B ${slotName}s` : `Apply ${payload?.profileName ?? "tuning changes"}`}</DialogTitle>
           <DialogDescription>
             {isAb
-              ? "Each PID profile slot is snapshotted before it is overwritten. Profile A stays active; fly it, land, switch to B and fly again."
+              ? `Each ${slotName} slot is snapshotted before it is overwritten. Profile A stays active; fly it, land, switch to B and fly again.`
               : "Every write flow: snapshot → diff of every changed value → confirm → apply → EEPROM save."}
           </DialogDescription>
         </DialogHeader>
@@ -267,8 +281,8 @@ export default function ApplyFlow() {
             {msp.status?.armed && <Badge variant="warning">FC reports ARMED — disarm first</Badge>}
             {isAb && msp.status && (
               <p className="text-xs text-muted-foreground">
-                FC is on PID profile {msp.status.pidProfile + 1} of {msp.status.pidProfileCount}. Slots to write:{" "}
-                {payload!.ab!.map((v) => `${v.label} → profile ${v.profile + 1}`).join(", ")}.
+                FC is on {abKind === "rate" ? `rate profile ${msp.status.rateProfile + 1}` : `PID profile ${msp.status.pidProfile + 1} of ${msp.status.pidProfileCount}`}. Slots to write:{" "}
+                {payload!.ab!.map((v) => `${v.label} → ${slotName} ${v.profile + 1}`).join(", ")}.
               </p>
             )}
             <Button onClick={() => void (isAb ? reviewAb() : review())} disabled={!msp.writable || busy || !!msp.status?.armed}>
@@ -283,7 +297,7 @@ export default function ApplyFlow() {
               <div key={plan.profile} className="space-y-2 rounded-lg border p-3">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-medium">{plan.label}</span>
-                  <Badge variant="secondary">PID profile {plan.profile + 1}</Badge>
+                  <Badge variant="secondary">{slotName} {plan.profile + 1}</Badge>
                 </div>
                 {plan.diff.length === 0 ? (
                   <p className="text-xs text-muted-foreground">This slot already matches the variant.</p>
@@ -348,13 +362,28 @@ export default function ApplyFlow() {
         {connected && step === "done" && isAb && (
           <div className="space-y-3">
             <p className="text-sm text-success">
-              Both profiles written and saved. The FC is on {abPlans[0]?.label} (PID profile {(abPlans[0]?.profile ?? 0) + 1}).
+              Both profiles written and saved. The FC is on {abPlans[0]?.label} ({slotName} {(abPlans[0]?.profile ?? 0) + 1}).
             </p>
-            <ol className="list-decimal space-y-1 pl-5 text-xs text-muted-foreground">
-              <li>Fly A for at least 30 s: the same lines, a few sharp stick moves, some throttle chops. Land and disarm.</li>
-              <li>Switch to B while disarmed: stick command (throttle low, yaw left, then roll left = profile 1, pitch up = profile 2, roll right = profile 3; check the stick-command chart in Configurator) or OSD menu → Profiles. Betaflight 4.5 has no in-flight switch for PID profiles.</li>
-              <li>Fly B the same way in the same pack. Every arm starts a new blackbox session — upload the file and use "Compare with" in the Log Lab.</li>
-            </ol>
+            {abKind === "rate" ? (
+              <ol className="list-decimal space-y-1 pl-5 text-xs text-muted-foreground">
+                <li>
+                  Put "Rate Profile Selection" on a 3-position switch once: Configurator → Adjustments, or CLI{" "}
+                  <code>adjrange 0 0 &lt;aux&gt; 900 2100 12 &lt;aux&gt; 0 0</code> (function 12; switch low = rate profile 1, middle = 2,
+                  high = 3). Rate profiles switch in flight.
+                </li>
+                <li>Fly A for at least 30 s with the usual moves, then land and disarm. Flip the switch to B, arm and fly the same lines.</li>
+                <li>Every arm is its own blackbox session; the Log Lab labels them A and B from the rates in the headers.</li>
+              </ol>
+            ) : (
+              <ol className="list-decimal space-y-1 pl-5 text-xs text-muted-foreground">
+                <li>Fly A for at least 30 s: the same lines, a few sharp stick moves, some throttle chops. Land and disarm.</li>
+                <li>
+                  Switch to B while disarmed: stick command with throttle down and yaw left, then roll left = PID profile 1, pitch up = profile 2,
+                  roll right = profile 3 (the FC LED flickers) — or OSD menu → Profiles. Betaflight 4.5 has no in-flight switch for PID profiles.
+                </li>
+                <li>Fly B the same way in the same pack. Every arm starts a new blackbox session — upload the file; the Log Lab labels A and B and "Compare with" puts them side by side.</li>
+              </ol>
+            )}
             {error && <p className="text-sm text-destructive">{error}</p>}
             <div className="flex gap-2">
               <Button variant="outline" onClick={() => void restoreAb()} disabled={busy}>

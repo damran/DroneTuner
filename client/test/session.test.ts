@@ -11,6 +11,7 @@ const sent: { command: number; payload?: Uint8Array }[] = [];
 const fake = {
   armed: false,
   pidProfile: 0,
+  rateProfile: 0,
   statusFails: false,
 };
 const MSP_STATUS_EX_CMD = 150;
@@ -31,11 +32,13 @@ vi.mock("../src/lib/msp/serial", () => {
         p[6] = fake.armed ? 1 : 0; // flightModeFlags bit 0 = ARMED
         p[10] = fake.pidProfile;
         p[13] = 3; // PID profile count
-        p[14] = 0; // rate profile
+        p[14] = fake.rateProfile;
         return p;
       }
       if (command === MSP_SELECT_SETTING_CMD) {
-        fake.pidProfile = (payload?.[0] ?? 0) & 0x7f;
+        const v = payload?.[0] ?? 0;
+        if (v & 0x80) fake.rateProfile = v & 0x7f;
+        else fake.pidProfile = v & 0x7f;
         return new Uint8Array(0);
       }
       return new Uint8Array(64);
@@ -73,6 +76,7 @@ beforeEach(() => {
   sent.length = 0;
   fake.armed = false;
   fake.pidProfile = 0;
+  fake.rateProfile = 0;
   fake.statusFails = false;
   useMspStore.setState({
     config,
@@ -118,6 +122,25 @@ describe("msp session arming guard", () => {
     await expect(useMspStore.getState().restore(dump(undefined))).rejects.toThrow(/arming state/);
     await expect(useMspStore.getState().saveEeprom()).rejects.toThrow(/arming state/);
     expect(commandsSent().filter((c) => c !== MSP_STATUS_EX_CMD)).toEqual([]);
+  });
+
+  it("selectRateProfile sets the rate-profile bit and refuses when armed", async () => {
+    await useMspStore.getState().selectRateProfile(1);
+    const select = sent.find((s) => s.command === MSP_SELECT_SETTING_CMD);
+    expect(select?.payload?.[0]).toBe(0x80 | 1);
+    expect(fake.rateProfile).toBe(1);
+    sent.length = 0;
+    fake.armed = true;
+    await expect(useMspStore.getState().selectRateProfile(2)).rejects.toThrow(/ARMED/);
+    expect(commandsSent()).not.toContain(MSP_SELECT_SETTING_CMD);
+  });
+
+  it("restore selects the dump's rate profile before replaying the rates section", async () => {
+    const d = { ...dump(undefined), rateProfile: 2 };
+    await useMspStore.getState().restore(d);
+    const select = sent.find((s) => s.command === MSP_SELECT_SETTING_CMD);
+    expect(select?.payload?.[0]).toBe(0x80 | 2);
+    expect(commandsSent().indexOf(MSP_SET_FILTER_CONFIG)).toBeGreaterThan(commandsSent().indexOf(MSP_SELECT_SETTING_CMD));
   });
 
   it("restore selects the dump's profile before replaying, then saves", async () => {

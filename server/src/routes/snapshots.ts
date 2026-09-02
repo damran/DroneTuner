@@ -32,6 +32,7 @@ const createSchema = z.object({
     ),
     decoded: z.object({ pids: z.record(z.object({ p: z.number(), i: z.number(), d: z.number() })) }).passthrough(),
     pidProfile: z.number().int().min(0).max(3).optional(),
+    rateProfile: z.number().int().min(0).max(5).optional(),
   }),
   reason: z.string().nullable().optional(),
 });

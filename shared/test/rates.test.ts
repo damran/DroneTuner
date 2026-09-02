@@ -42,6 +42,8 @@ function makeLog(opts: {
   if (opts.throttle) channels["rcCommand[3]"] = new Float32Array(opts.throttle);
   return {
     headers: opts.headers ?? {},
+    sessionIndex: 0,
+    sessionCount: 1,
     frameCount: n,
     timeUs: new Float32Array(n).map((_, i) => i * 1000),
     channels,

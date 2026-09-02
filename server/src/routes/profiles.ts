@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { desc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import type { FcConfig, Profile, ProfileSettings } from "@dronetuner/shared";
-import { TUNE_GOALS } from "@dronetuner/shared";
+import { LEGACY_TUNE_GOALS, TUNE_GOALS } from "@dronetuner/shared";
 import type { AppContext } from "../context";
 import { profiles } from "../db/schema";
 import { buildApplyPlan } from "../services/applyplan";
@@ -142,8 +142,10 @@ const fcConfigSchema = z
 
 const createSchema = z.object({
   name: z.string().min(1),
-  goal: z.enum([...TUNE_GOALS] as [string, ...string[]]),
+  goal: z.enum([...TUNE_GOALS, ...Object.keys(LEGACY_TUNE_GOALS)] as [string, ...string[]]).transform((g) => LEGACY_TUNE_GOALS[g] ?? g),
   sizeClass: z.string().nullable().optional(),
+  videoSystem: z.enum(["analog", "hd"]).nullable().optional(),
+  notes: z.string().max(4000).nullable().optional(),
   droneId: z.number().int().positive().nullable().optional(),
   settings: settingsSchema.optional().default({}),
   source: z.enum(["template", "generated", "snapshot"]).optional().default("template"),
@@ -151,8 +153,9 @@ const createSchema = z.object({
 
 const updateSchema = z.object({
   name: z.string().min(1).optional(),
-  goal: z.enum([...TUNE_GOALS] as [string, ...string[]]).optional(),
+  goal: z.enum([...TUNE_GOALS, ...Object.keys(LEGACY_TUNE_GOALS)] as [string, ...string[]]).transform((g) => LEGACY_TUNE_GOALS[g] ?? g).optional(),
   sizeClass: z.string().nullable().optional(),
+  videoSystem: z.enum(["analog", "hd"]).nullable().optional(),
   settings: settingsSchema.optional(),
 });
 
@@ -163,6 +166,8 @@ function toProfile(row: typeof profiles.$inferSelect): Profile {
     name: row.name,
     goal: row.goal,
     sizeClass: row.sizeClass,
+    videoSystem: row.videoSystem,
+    notes: row.notes,
     settings: (row.settingsJson ?? {}) as ProfileSettings,
     source: row.source as Profile["source"],
     createdAt: row.createdAt,
@@ -204,6 +209,8 @@ export default async function profilesRoutes(app: FastifyInstance, opts: { ctx: 
         name: body.name,
         goal: body.goal,
         sizeClass: body.sizeClass ?? null,
+        videoSystem: body.videoSystem ?? null,
+        notes: body.notes ?? null,
         droneId: body.droneId ?? null,
         settingsJson: body.settings,
         source: body.source,
@@ -229,6 +236,7 @@ export default async function profilesRoutes(app: FastifyInstance, opts: { ctx: 
         name: body.name ?? existing.name,
         goal: body.goal ?? existing.goal,
         sizeClass: body.sizeClass !== undefined ? body.sizeClass : existing.sizeClass,
+        videoSystem: body.videoSystem !== undefined ? body.videoSystem : existing.videoSystem,
         settingsJson: body.settings ?? existing.settingsJson,
       })
       .where(eq(profiles.id, id))
@@ -252,6 +260,8 @@ export default async function profilesRoutes(app: FastifyInstance, opts: { ctx: 
         name: `${existing.name} (copy)`,
         goal: existing.goal,
         sizeClass: existing.sizeClass,
+        videoSystem: existing.videoSystem,
+        notes: existing.notes,
         droneId: existing.droneId,
         settingsJson: existing.settingsJson,
         source: existing.source,

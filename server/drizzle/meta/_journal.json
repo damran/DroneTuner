@@ -15,6 +15,20 @@
       "when": 1787640000000,
       "tag": "0001_fc_identity_vendor_presets",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788000000000,
+      "tag": "0002_log_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1788000100000,
+      "tag": "0003_vendor_class_video",
+      "breakpoints": true
     }
   ]
 }

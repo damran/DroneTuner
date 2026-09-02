@@ -67,6 +67,8 @@ export interface Drone {
   fcBoard: string | null;
   fcCraftName: string | null;
   fcUid: string | null;
+  /** "analog" | "hd" | null (unknown) */
+  videoSystem: string | null;
 }
 
 export interface DroneComponentLink {
@@ -100,6 +102,23 @@ export interface FlightLog {
   filePath: string;
   headers: Record<string, string> | null;
   uploadedAt: number;
+  /** 0-based flight session inside the uploaded file (a flash download holds one per arm). */
+  sessionIndex: number;
+  sessionCount: number;
+  /** Name of the uploaded file, e.g. "BTFL_BLACKBOX_LOG_AIR65_R_20260518_125703_BETAFPVG473.BBL". */
+  originalName: string | null;
+  /** Flight duration from the log's own timestamps (seconds). */
+  durationS: number | null;
+  /** When the flight was recorded: log header datetime, else the filename timestamp, else null. */
+  recordedAt: number | null;
+}
+
+/** Response of POST /api/logs: one row per kept flight session. */
+export interface LogUploadResult {
+  logs: FlightLog[];
+  /** sessions in the file that were too short (arm/disarm blips) or unparsable */
+  skippedSessions: number;
+  sessionCount: number;
 }
 
 export interface Analysis {
@@ -112,27 +131,42 @@ export interface Analysis {
 
 export type ProfileSource = "template" | "generated" | "snapshot";
 
-export type TuneGoal = "racing" | "freestyle" | "cinematic" | "efficiency" | "low_noise" | "low_latency";
+/**
+ * What the pilot wants from the tune. Latency-vs-filtering is NOT a goal any
+ * more — it is the crisp/balanced/smooth variant chosen by the A/B flight test
+ * (see shared/src/tuning/variants.ts).
+ */
+export type TuneGoal = "precision" | "freestyle" | "racing" | "cinematic";
 
-export const TUNE_GOALS: readonly TuneGoal[] = [
-  "racing",
-  "freestyle",
-  "cinematic",
-  "efficiency",
-  "low_noise",
-  "low_latency",
-];
+export const TUNE_GOALS: readonly TuneGoal[] = ["precision", "freestyle", "racing", "cinematic"];
 
 export const TUNE_GOAL_LABELS: Record<TuneGoal, string> = {
-  racing: "Racing",
+  precision: "Indoor precision",
   freestyle: "Freestyle",
+  racing: "Racing",
   cinematic: "Cinematic",
-  efficiency: "Efficiency",
-  low_noise: "Low noise",
-  low_latency: "Low latency",
 };
 
-export const SIZE_CLASSES = ["65mm", "75mm", "2.5in", "3in", "3.5in", "4in", "5in"] as const;
+export const TUNE_GOAL_DESCRIPTIONS: Record<TuneGoal, string> = {
+  precision: "Tight indoor lines, gaps and powerloops: no feedforward, late TPA, D-min for a quiet hover.",
+  freestyle: "Outdoor flips, rolls and dives: moderate feedforward, default filtering, higher rates.",
+  racing: "Gates and fast lines: more P/D and feedforward, early TPA, lower max rates for precision.",
+  cinematic: "Smooth footage: softer gains, no feedforward, low rates.",
+};
+
+/** Legacy goal names that older profiles may still carry. */
+export const LEGACY_TUNE_GOALS: Record<string, TuneGoal> = {
+  efficiency: "cinematic",
+  low_noise: "freestyle",
+  low_latency: "racing",
+};
+
+export const SIZE_CLASSES = ["65mm", "75mm", "85mm", "2in", "2.5in", "3in", "3.5in", "4in", "5in"] as const;
+
+/** Video system of a build. HD payload (O3/O4/Walksnail/HDZero) adds mass and changes the tune. */
+export const VIDEO_SYSTEMS = ["analog", "hd"] as const;
+export type VideoSystem = (typeof VIDEO_SYSTEMS)[number];
+export const VIDEO_SYSTEM_LABELS: Record<VideoSystem, string> = { analog: "Analog", hd: "HD (digital)" };
 
 export interface Profile {
   id: number;
@@ -140,6 +174,10 @@ export interface Profile {
   name: string;
   goal: string;
   sizeClass: string | null;
+  /** null = fits any video system */
+  videoSystem: string | null;
+  /** Plain-language rationale for the numbers (templates cite their sources here). */
+  notes: string | null;
   settings: ProfileSettings;
   source: ProfileSource;
   createdAt: number;
@@ -193,7 +231,10 @@ export interface BatteryStat {
 
 // ---------- Vendor presets & auto-detect ----------
 
-export type VendorPresetSource = "upload" | "url" | "manual";
+export type VendorPresetSource = "upload" | "url" | "manual" | "seed";
+
+/** "factory" = a vendor/BNF CLI dump; "preset" = a Betaflight community preset (firmware-presets repo). */
+export type VendorPresetKind = "factory" | "preset";
 
 /**
  * A vendor/BNF stock Betaflight config (parsed from a CLI dump). Can be
@@ -215,6 +256,16 @@ export interface VendorPreset {
   cliDump: string | null;
   sourceUrl: string | null;
   createdAt: number;
+  vendor: string | null;
+  /** size class the config targets ("65mm", "2in", … or "any") */
+  sizeClass: string | null;
+  /** "analog" | "hd" | "any" */
+  videoSystem: string | null;
+  cells: string | null;
+  bfVersion: string | null;
+  kind: VendorPresetKind;
+  variant: string | null;
+  notes: string | null;
 }
 
 export interface DetectMatch {

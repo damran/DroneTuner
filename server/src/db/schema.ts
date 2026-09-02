@@ -19,6 +19,8 @@ export const drones = sqliteTable("drones", {
   fcBoard: text("fc_board"),
   fcCraftName: text("fc_craft_name"),
   fcUid: text("fc_uid"),
+  /** "analog" | "hd" — HD payload changes the tune, so templates match on it. */
+  videoSystem: text("video_system"),
 });
 
 export const droneComponents = sqliteTable(
@@ -52,6 +54,14 @@ export const logs = sqliteTable("logs", {
   filePath: text("file_path").notNull(),
   headersJson: text("headers_json", { mode: "json" }),
   uploadedAt: integer("uploaded_at").notNull(),
+  // A flash download holds one session per arm; each session is its own log
+  // row pointing at the same file (see routes/logs.ts).
+  sessionIndex: integer("session_index").notNull().default(0),
+  sessionCount: integer("session_count").notNull().default(1),
+  originalName: text("original_name"),
+  durationS: integer("duration_s"),
+  /** When the flight was recorded (log header, else the filename timestamp). */
+  recordedAt: integer("recorded_at"),
 });
 
 export const flights = sqliteTable("flights", {
@@ -84,6 +94,10 @@ export const profiles = sqliteTable("profiles", {
   name: text("name").notNull(),
   goal: text("goal").notNull(),
   sizeClass: text("size_class"),
+  /** null = fits any video system */
+  videoSystem: text("video_system"),
+  /** Plain-language rationale (templates: where the numbers come from). */
+  notes: text("notes"),
   settingsJson: text("settings_json", { mode: "json" }).notNull().default("{}"),
   source: text("source").notNull().default("template"),
   createdAt: integer("created_at").notNull(),
@@ -110,6 +124,15 @@ export const vendorPresets = sqliteTable("vendor_presets", {
   cliDump: text("cli_dump"),
   sourceUrl: text("source_url"),
   createdAt: integer("created_at").notNull(),
+  // Seeded catalogue metadata (vendor factory dumps + Betaflight community presets).
+  vendor: text("vendor"),
+  sizeClass: text("size_class"),
+  videoSystem: text("video_system"),
+  cells: text("cells"),
+  bfVersion: text("bf_version"),
+  kind: text("kind").notNull().default("factory"),
+  variant: text("variant"),
+  notes: text("notes"),
 });
 
 export const chatMessages = sqliteTable("chat_messages", {

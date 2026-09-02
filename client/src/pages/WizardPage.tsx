@@ -1,28 +1,41 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { AbTestKind, Analysis, DroneSummary, FlightLog, Profile, ProfileSettings, RateSettings, TuneGoal } from "@dronetuner/shared";
+import type {
+  AbTest,
+  AbTestKind,
+  Analysis,
+  DroneSummary,
+  FlightLog,
+  Profile,
+  ProfileSettings,
+  RateSettings,
+  TuneGoal,
+  TuningProgressRow,
+} from "@dronetuner/shared";
 import { TUNE_GOALS, TUNE_GOAL_LABELS } from "@dronetuner/shared";
 import {
+  AB_PAIRS,
+  AB_PAIR_BY_ID,
+  abPairVariants,
   applyChanges,
-  applyVariant,
   cliOnlyKeys,
-  filterDiffKeys,
   formatSettingValue,
   rateAbVariant,
   runRules,
+  sequenceStatus,
   settingLabel,
+  settingsDiffKeys,
   settingsToCli,
   splitFilterScope,
-  TUNE_VARIANT_DESCRIPTIONS,
-  TUNE_VARIANT_LABELS,
-  TUNE_VARIANTS,
-  type TuneVariant,
+  type AbPairId,
+  type TuningStepId,
 } from "@dronetuner/shared/tuning";
 import { estimateFilterDelay, filterConfigFromProfile } from "@dronetuner/shared/analysis";
 import { useMspStore } from "@/lib/msp";
 import { useAdvanced } from "@/lib/ui-store";
 import SimplifiedSliders from "@/components/SimplifiedSliders";
-import { apiGet, apiPost } from "@/lib/api";
+import TuningSequenceCard from "@/components/TuningSequenceCard";
+import { apiGet, apiPost, apiPut } from "@/lib/api";
 import { useApplyStore } from "@/lib/apply-store";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,17 +50,27 @@ import {
 } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
-/** Every unordered pair of variants, crisp-first, for the A/B picker. */
-const AB_PAIRS: [TuneVariant, TuneVariant][] = TUNE_VARIANTS.flatMap((a, i) =>
-  TUNE_VARIANTS.slice(i + 1).map((b) => [a, b] as [TuneVariant, TuneVariant]),
-);
-
-const shortVariantLabel = (v: TuneVariant): string => TUNE_VARIANT_LABELS[v].split(" (")[0]!;
-
 /** "190 / 190 / 200" style cell for a per-axis rate triple, scaled to display units. */
 function rateTriple(rates: RateSettings, r: keyof RateSettings, p: keyof RateSettings, y: keyof RateSettings, scale: number): string {
   const fmt = (v: number | undefined) => (v === undefined ? "—" : scale >= 1 ? String(Math.round(v * scale)) : (v * scale).toFixed(2));
   return `${fmt(rates[r])} / ${fmt(rates[p])} / ${fmt(rates[y])}`;
+}
+
+/** Human label for a dotted settings key (pids.roll.p, filters.dtermLowpass2Hz, advanced.idleMinRpm). */
+function dottedLabel(key: string): string {
+  const [section, ...rest] = key.split(".");
+  if (section === "pids") return `${rest[0]} ${rest[1]!.toUpperCase()}`;
+  return settingLabel(section as "filters" | "rates" | "advanced", rest.join("."));
+}
+
+function dottedValue(settings: ProfileSettings, key: string): string {
+  const [section, ...rest] = key.split(".");
+  if (section === "pids") {
+    const v = settings.pids?.[rest[0] as "roll" | "pitch" | "yaw"]?.[rest[1] as "p" | "i" | "d"];
+    return v === undefined ? "—" : String(v);
+  }
+  const v = (settings[section as "filters" | "rates" | "advanced"] as Record<string, number | undefined> | undefined)?.[rest[0]!];
+  return v === undefined ? "—" : formatSettingValue(key, v, settings.rates?.ratesType);
 }
 
 /**
@@ -56,14 +79,14 @@ function rateTriple(rates: RateSettings, r: keyof RateSettings, p: keyof RateSet
  * LPF or notch change to "A vs B").
  */
 function AbScopeNote({ a, b }: { a: ProfileSettings; b: ProfileSettings }) {
-  const differs = filterDiffKeys(a.filters, b.filters);
+  const differs = settingsDiffKeys(a, b);
   const { master } = splitFilterScope(a.filters);
   const masterKeys = Object.keys(master).filter((k) => (master as Record<string, number>)[k] !== undefined);
   return (
     <div className="space-y-1 text-xs text-muted-foreground">
       <p>
         <span className="font-medium text-foreground">Differs between A and B:</span>{" "}
-        {differs.length > 0 ? differs.map((k) => settingLabel("filters", k)).join(", ") : "nothing (same variant on both sides)"}.
+        {differs.length > 0 ? differs.map(dottedLabel).join(", ") : "nothing (same settings on both sides)"}.
       </p>
       {masterKeys.length > 0 && (
         <p>
@@ -89,9 +112,10 @@ export default function WizardPage() {
   const start = useApplyStore((s) => s.start);
   const fcStatus = useMspStore((s) => s.status);
   const advanced = useAdvanced();
-  // In-flight A/B: which two variants, and which PID profile slot each gets.
-  const [abPair, setAbPair] = useState<[TuneVariant, TuneVariant]>(["crisp", "balanced"]);
+  // In-flight A/B: which pair (shared/src/tuning/pairs.ts), and which PID profile slot each side gets.
+  const [abPairId, setAbPairId] = useState<AbPairId>("dterm-crisp");
   const [abSlots, setAbSlots] = useState<[number, number]>([0, 1]);
+  const [savingStep, setSavingStep] = useState<TuningStepId | null>(null);
   const [copiedVariant, setCopiedVariant] = useState<string | null>(null);
   // Rate-profile A/B (switchable in flight): which two rate profile slots.
   const [rateSlots, setRateSlots] = useState<[number, number]>([0, 1]);
@@ -120,6 +144,36 @@ export default function WizardPage() {
     queryFn: () => apiGet<Analysis>(`/api/logs/${latestLogId}/analysis`),
     retry: false,
   });
+  // Tuning sequence: recorded A/B tests (evidence) + the pilot's ticks.
+  const { data: abTests } = useQuery({
+    queryKey: ["ab-tests", droneId],
+    enabled: !!droneId,
+    queryFn: () => apiGet<AbTest[]>(`/api/ab-tests?droneId=${droneId}`),
+  });
+  const { data: progress, refetch: refetchProgress } = useQuery({
+    queryKey: ["tuning-progress", droneId],
+    enabled: !!droneId,
+    queryFn: () => apiGet<TuningProgressRow[]>(`/api/drones/${droneId}/tuning-progress`),
+  });
+  const sequence = useMemo(
+    () =>
+      sequenceStatus({
+        hasAnalysis: !!analysis,
+        abTests: abTests ?? [],
+        progress: (progress ?? []).map((p) => ({ step: p.step as TuningStepId, done: p.done, updatedAt: p.updatedAt, notes: p.notes })),
+      }),
+    [analysis, abTests, progress],
+  );
+  const toggleStep = async (step: TuningStepId, done: boolean) => {
+    if (!drone) return;
+    setSavingStep(step);
+    try {
+      await apiPut(`/api/drones/${drone.id}/tuning-progress/${step}`, { done });
+      await refetchProgress();
+    } finally {
+      setSavingStep(null);
+    }
+  };
 
   // Match on size class + video system (HD whoops carry more mass and get their
   // own templates); a template with videoSystem null fits any build.
@@ -193,18 +247,21 @@ export default function WizardPage() {
 
   const draftCli = useMemo(() => (draftSettings ? settingsToCli(draftSettings) : []), [draftSettings]);
 
-  // Variant settings for the A/B: only the D-term chain differs (gyro
-  // filters, dyn notch and RPM filter are master settings shared by every
-  // PID profile — see shared/src/tuning/variants.ts).
+  // The two sides of the selected pair. Every pair only touches keys a PID
+  // profile owns (D-term chain, PIDs, D-min, FF, dynamic idle); gyro filters,
+  // dyn notch and RPM filter are master settings shared by every profile.
+  const abDef = AB_PAIR_BY_ID[abPairId];
   const abVariants = useMemo(() => {
     if (!draftSettings) return null;
-    return (["A", "B"] as const).map((side, i) => {
-      const variant = abPair[i]!;
-      const settings = applyVariant(draftSettings, variant, "profile");
-      const delay = estimateFilterDelay(filterConfigFromProfile(settings), {});
-      return { side, variant, settings, delay, label: `${side} · ${shortVariantLabel(variant)}` };
-    });
-  }, [draftSettings, abPair]);
+    const pair = abPairVariants(draftSettings, abPairId);
+    if (!pair) return null;
+    return pair.map((v) => ({ ...v, delay: estimateFilterDelay(filterConfigFromProfile(v.settings), {}) }));
+  }, [draftSettings, abPairId]);
+  const abDiffKeys = useMemo(
+    () => (abVariants ? settingsDiffKeys(abVariants[0]!.settings, abVariants[1]!.settings) : []),
+    [abVariants],
+  );
+  const abFiltersDiffer = abDiffKeys.some((k) => k.startsWith("filters."));
   const profileCount = fcStatus?.pidProfileCount ?? 3;
 
   // Rate A/B: A = the draft's rates, B = centre sensitivity × 1.3 (ACTUAL only).
@@ -226,7 +283,13 @@ export default function WizardPage() {
         ? abVariants?.map((v, i) => ({ side: v.side, label: v.label, slot: abSlots[i]!, settings: v.settings }))
         : rateVariants?.map((v, i) => ({ side: v.side, label: v.label, slot: rateSlots[i]!, settings: { rates: v.rates } }));
     if (!variants) return;
-    await apiPost("/api/ab-tests", { droneId: drone.id, kind, variants, notes: "saved from the wizard (CLI write)" });
+    await apiPost("/api/ab-tests", {
+      droneId: drone.id,
+      kind,
+      variants,
+      notes: "saved from the wizard (CLI write)",
+      pairId: kind === "pid" ? abPairId : null,
+    });
     setPairSaved(kind);
     setTimeout(() => setPairSaved(null), 2500);
   };
@@ -332,6 +395,8 @@ export default function WizardPage() {
             </CardContent>
           </Card>
 
+          <TuningSequenceCard status={sequence} onToggle={(step, done) => void toggleStep(step, done)} onPickPair={setAbPairId} saving={savingStep} />
+
           {analysis && (!analysis.metrics.spectral || analysis.metrics.gyroRateHz == null) && (
             <Card>
               <CardContent className="p-4 text-sm text-muted-foreground">
@@ -403,31 +468,30 @@ export default function WizardPage() {
             </Card>
           )}
 
-          {draftSettings && abVariants && (
+          {draftSettings && (
             <Card>
               <CardHeader className="p-4">
                 <CardTitle className="text-sm">Compare in flight (A/B)</CardTitle>
                 <p className="text-xs text-muted-foreground">
-                  Two versions of this draft are written into two PID profiles. They share PIDs, feedforward, rates and the
-                  gyro filters (those are global); only the D-term filter chain differs, so what you feel on the switch is the
-                  filtering-vs-delay trade-off itself.
+                  Two versions of this draft are written into two PID profiles and flown in one pack. Each pair changes one
+                  thing a PID profile owns — the D-term filter chain, the master multiplier, the P&amp;I tracking step,
+                  feedforward or dynamic idle — so what you feel on the switch is that one question (Rosser's slider sweep,
+                  one step per pack).
                 </p>
               </CardHeader>
               <CardContent className="space-y-3 p-4 pt-0">
                 <div className="flex flex-wrap items-end gap-3">
                   <div className="space-y-1">
                     <Label>Pair</Label>
-                    <Select
-                      value={abPair.join("|")}
-                      onValueChange={(v) => setAbPair(v.split("|") as [TuneVariant, TuneVariant])}
-                    >
-                      <SelectTrigger className="w-56">
+                    <Select value={abPairId} onValueChange={(v) => setAbPairId(v as AbPairId)}>
+                      <SelectTrigger className="w-72 max-w-full">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {AB_PAIRS.map(([a, b]) => (
-                          <SelectItem key={`${a}|${b}`} value={`${a}|${b}`}>
-                            {shortVariantLabel(a)} vs {shortVariantLabel(b)}
+                        {AB_PAIRS.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            {p.group === "filter" ? "Filters · " : "PIDs · "}
+                            {p.title}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -458,30 +522,54 @@ export default function WizardPage() {
                     </div>
                   ))}
                 </div>
+                <div className="space-y-1 text-xs">
+                  <p>
+                    <span className="font-medium">Change:</span> {abDef.change}
+                  </p>
+                  <p>
+                    <span className="font-medium">Decides:</span> {abDef.decides}
+                  </p>
+                  {advanced && (
+                    <p className="text-muted-foreground">
+                      <span className="font-medium">Source:</span> {abDef.source}
+                    </p>
+                  )}
+                </div>
+                {!abVariants ? (
+                  <p className="text-xs text-muted-foreground">
+                    This pair needs a value the draft does not carry (e.g. dynamic idle or PIDs) — pick another pair or a template
+                    with the full field set.
+                  </p>
+                ) : (
+                  <>
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Variant</TableHead>
-                      <TableHead>D-term LPF1 (dyn)</TableHead>
-                      <TableHead>D-term LPF2</TableHead>
-                      <TableHead title="Predicted group delay of the D-term path at 50 Hz, min–max throttle">D-path delay</TableHead>
-                      <TableHead>Feel</TableHead>
+                      <TableHead>Setting</TableHead>
+                      <TableHead>{abVariants[0]!.label}</TableHead>
+                      <TableHead>{abVariants[1]!.label}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {abVariants.map((v) => (
-                      <TableRow key={v.side}>
-                        <TableCell className="font-medium">{v.label}</TableCell>
-                        <TableCell>
-                          {v.settings.filters?.dtermLowpassDynMinHz ?? "—"}–{v.settings.filters?.dtermLowpassDynMaxHz ?? "—"} Hz
-                        </TableCell>
-                        <TableCell>{v.settings.filters?.dtermLowpass2Hz ?? "—"} Hz</TableCell>
-                        <TableCell>
-                          {v.delay.dtermMs.toFixed(1)}–{v.delay.dtermMsMax.toFixed(1)} ms
-                        </TableCell>
-                        <TableCell className="max-w-xs text-xs text-muted-foreground">{TUNE_VARIANT_DESCRIPTIONS[v.variant]}</TableCell>
+                    {abDiffKeys.map((k) => (
+                      <TableRow key={k}>
+                        <TableCell className="font-medium">{dottedLabel(k)}</TableCell>
+                        <TableCell>{dottedValue(abVariants[0]!.settings, k)}</TableCell>
+                        <TableCell>{dottedValue(abVariants[1]!.settings, k)}</TableCell>
                       </TableRow>
                     ))}
+                    {abFiltersDiffer && (
+                      <TableRow>
+                        <TableCell className="font-medium" title="Predicted group delay of the D-term path at 50 Hz, min–max throttle">
+                          D-path delay
+                        </TableCell>
+                        {abVariants.map((v) => (
+                          <TableCell key={v.side}>
+                            {v.delay.dtermMs.toFixed(1)}–{v.delay.dtermMsMax.toFixed(1)} ms
+                          </TableCell>
+                        ))}
+                      </TableRow>
+                    )}
                   </TableBody>
                 </Table>
                 <AbScopeNote a={abVariants[0]!.settings} b={abVariants[1]!.settings} />
@@ -494,6 +582,7 @@ export default function WizardPage() {
                         droneId: drone.id,
                         profileName: "A/B",
                         abKind: "pid",
+                        abPairId,
                         ab: abVariants.map((v, i) => ({ side: v.side, label: v.label, profile: abSlots[i]!, settings: v.settings })),
                       });
                     }}
@@ -534,6 +623,8 @@ export default function WizardPage() {
                   profile 2, roll right = profile 3, or the OSD menu → Profiles), fly the same lines again in the same pack.
                   Every arm starts a new blackbox session, so the Log Lab labels A and B and compares them side by side.
                 </p>
+                  </>
+                )}
               </CardContent>
             </Card>
           )}

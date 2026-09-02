@@ -150,7 +150,28 @@ export const abTests = sqliteTable("ab_tests", {
   createdAt: integer("created_at").notNull(),
   variantsJson: text("variants_json", { mode: "json" }).notNull().default("[]"),
   notes: text("notes"),
+  /** Wizard pair id (shared/src/tuning/pairs.ts) — lets the tuning sequence see which step was flown. */
+  pairId: text("pair_id"),
 });
+
+/**
+ * Tuning-sequence progress per drone (shared/src/tuning/sequence.ts): the
+ * steps the pilot ticked. Steps with data evidence (a log analysed, an A/B
+ * pair recorded) are inferred at read time and not stored.
+ */
+export const tuningProgress = sqliteTable(
+  "tuning_progress",
+  {
+    droneId: integer("drone_id")
+      .notNull()
+      .references(() => drones.id, { onDelete: "cascade" }),
+    step: text("step").notNull(),
+    done: integer("done", { mode: "boolean" }).notNull().default(false),
+    updatedAt: integer("updated_at").notNull(),
+    notes: text("notes"),
+  },
+  (t) => [primaryKey({ columns: [t.droneId, t.step] })],
+);
 
 export const chatMessages = sqliteTable("chat_messages", {
   id: integer("id").primaryKey({ autoIncrement: true }),

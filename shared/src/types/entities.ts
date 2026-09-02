@@ -324,4 +324,15 @@ export interface AbTest {
   createdAt: number;
   variants: AbTestVariant[];
   notes: string | null;
+  /** Which wizard pair produced it (shared/src/tuning/pairs.ts AbPairId); null for rate tests and older rows. */
+  pairId?: string | null;
+}
+
+/** One step of the tuning sequence ticked (or unticked) by the pilot for a drone. */
+export interface TuningProgressRow {
+  droneId: number;
+  step: string;
+  done: boolean;
+  updatedAt: number;
+  notes: string | null;
 }

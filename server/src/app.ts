@@ -17,6 +17,7 @@ import detectRoutes from "./routes/detect";
 import vendorPresetsRoutes from "./routes/vendorPresets";
 import chatRoutes from "./routes/chat";
 import abTestsRoutes from "./routes/abTests";
+import tuningProgressRoutes from "./routes/tuningProgress";
 
 export function buildApp(ctx: AppContext): FastifyInstance {
   const app = Fastify({ logger: true });
@@ -61,6 +62,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
   app.register(vendorPresetsRoutes, { ctx });
   app.register(chatRoutes, { ctx });
   app.register(abTestsRoutes, { ctx });
+  app.register(tuningProgressRoutes, { ctx });
 
   // Serve the built client (production / Docker) when a bundle is configured and exists.
   const clientDist = ctx.config.clientDist;

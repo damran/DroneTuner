@@ -17,6 +17,7 @@ const createSchema = z.object({
   kind: z.enum(["pid", "rate"]),
   variants: z.tuple([variantSchema, variantSchema]),
   notes: z.string().max(500).nullable().optional(),
+  pairId: z.string().max(40).nullable().optional(),
 });
 
 function toAbTest(row: typeof abTests.$inferSelect): AbTest {
@@ -27,6 +28,7 @@ function toAbTest(row: typeof abTests.$inferSelect): AbTest {
     createdAt: row.createdAt,
     variants: row.variantsJson as AbTestVariant[],
     notes: row.notes,
+    pairId: row.pairId ?? null,
   };
 }
 
@@ -56,6 +58,7 @@ export default async function abTestsRoutes(app: FastifyInstance, opts: { ctx: A
         createdAt: Date.now(),
         variantsJson: body.variants as unknown as AbTestVariant[],
         notes: body.notes ?? null,
+        pairId: body.pairId ?? null,
       })
       .returning();
     return toAbTest(row!);

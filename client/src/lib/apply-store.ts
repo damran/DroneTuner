@@ -28,6 +28,8 @@ export interface ApplyPayload {
   ab?: AbVariantPayload[];
   /** Which profile slots the A/B switches: PID profiles (default) or rate profiles. */
   abKind?: "pid" | "rate";
+  /** Wizard pair that produced the A/B (shared/src/tuning/pairs.ts), recorded with the test. */
+  abPairId?: string;
 }
 
 interface ApplyState {

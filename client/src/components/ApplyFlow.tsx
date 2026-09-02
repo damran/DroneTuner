@@ -136,6 +136,7 @@ export default function ApplyFlow() {
           kind: abKind,
           variants: payload.ab!.map((v) => ({ side: v.side, label: v.label, slot: v.profile, settings: v.settings })),
           notes: `written via MSP ${new Date().toISOString()}`,
+          pairId: payload.abPairId ?? null,
         }).catch(() => {
           /* the FC write succeeded; the label record is a convenience */
         });

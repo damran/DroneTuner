@@ -22,6 +22,8 @@ export const apiPost = <T,>(path: string, body?: unknown): Promise<T> =>
   api<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
 export const apiPatch = <T,>(path: string, body?: unknown): Promise<T> =>
   api<T>(path, { method: "PATCH", body: body === undefined ? undefined : JSON.stringify(body) });
+export const apiPut = <T,>(path: string, body?: unknown): Promise<T> =>
+  api<T>(path, { method: "PUT", body: body === undefined ? undefined : JSON.stringify(body) });
 export const apiDelete = <T,>(path: string): Promise<T> => api<T>(path, { method: "DELETE" });
 
 export function photoUrl(path: string): string {

@@ -5,3 +5,5 @@ export * from "./rules";
 export * from "./variants";
 export * from "./ab";
 export * from "./simplified";
+export * from "./pairs";
+export * from "./sequence";

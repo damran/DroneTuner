@@ -8,8 +8,8 @@
  * comparing those values with the two variants that were written.
  */
 import type { AbTest, AbTestKind } from "../types/entities";
-import type { FilterSettings, ProfileSettings, RateSettings } from "../types/fc";
-import { RATES_TYPE } from "../types/fc";
+import type { AdvancedSettings, FilterSettings, PidAxisSettings, ProfileSettings, RateSettings } from "../types/fc";
+import { AXES, RATES_TYPE } from "../types/fc";
 import { PROFILE_SCOPED_FILTER_KEYS } from "./variants";
 
 /** B side of the rate A/B: centre sensitivity × this, same max rate and expo. */
@@ -47,7 +47,22 @@ export function rateAbVariant(rates: RateSettings | undefined, factor = AB_RATE_
 export interface AbFingerprint {
   filters: Partial<FilterSettings>;
   rates: Partial<RateSettings>;
+  /** rollPID / pitchPID / yawPID headers */
+  pids: PidAxisSettings;
+  /** ff_weight, d_min, d_max_gain, dyn_idle_min_rpm headers */
+  advanced: Partial<AdvancedSettings>;
 }
+
+/** PID-profile advanced keys a Betaflight 4.x log header carries (the PID pairs differ in these). */
+export const PROFILE_SCOPED_ADVANCED_KEYS: readonly (keyof AdvancedSettings)[] = [
+  "feedforwardRoll",
+  "feedforwardPitch",
+  "feedforwardYaw",
+  "dMinRoll",
+  "dMinPitch",
+  "dMaxGain",
+  "idleMinRpm",
+];
 
 function headerInt(headers: Record<string, string>, name: string): number | undefined {
   const raw = headers[name];
@@ -95,7 +110,23 @@ export function abFingerprintFromHeaders(headers: Record<string, string>): AbFin
   put(rates, "ratesType", headerInt(headers, "rates_type"));
   put(rates, "thrMid", headerInt(headers, "thr_mid"));
   put(rates, "thrExpo", headerInt(headers, "thr_expo"));
-  return { filters, rates };
+
+  const pids: PidAxisSettings = {};
+  for (const axis of AXES) {
+    const t = headerTriple(headers, `${axis}PID`);
+    if (t) pids[axis] = { p: t[0], i: t[1], d: t[2] };
+  }
+  const advanced: Partial<AdvancedSettings> = {};
+  const ff = headerTriple(headers, "ff_weight");
+  if (ff) [advanced.feedforwardRoll, advanced.feedforwardPitch, advanced.feedforwardYaw] = ff;
+  const dMin = (headers["d_min"] ?? "").split(",").map((v) => Number.parseInt(v.trim(), 10));
+  if (dMin.length >= 2 && !Number.isNaN(dMin[0]) && !Number.isNaN(dMin[1])) {
+    advanced.dMinRoll = dMin[0]!;
+    advanced.dMinPitch = dMin[1]!;
+  }
+  put(advanced, "dMaxGain", headerInt(headers, "d_max_gain"));
+  put(advanced, "idleMinRpm", headerInt(headers, "dyn_idle_min_rpm"));
+  return { filters, rates, pids, advanced };
 }
 
 export interface AbMatch {
@@ -105,15 +136,43 @@ export interface AbMatch {
   label: string;
 }
 
-/** The part of a variant's settings a log header can confirm for this kind of test. */
+/**
+ * The part of a variant's settings a log header can confirm for this kind of
+ * test, flattened to dotted keys (filters.x, pids.roll.p, advanced.x, rates.x).
+ */
 function comparable(settings: ProfileSettings, kind: AbTestKind): Record<string, number> {
   const out: Record<string, number> = {};
   if (kind === "pid") {
     for (const [k, v] of Object.entries(settings.filters ?? {})) {
-      if (v !== undefined && (PROFILE_SCOPED_FILTER_KEYS as readonly string[]).includes(k)) out[k] = v;
+      if (v !== undefined && (PROFILE_SCOPED_FILTER_KEYS as readonly string[]).includes(k)) out[`filters.${k}`] = v;
+    }
+    for (const axis of AXES) {
+      for (const term of ["p", "i", "d"] as const) {
+        const v = settings.pids?.[axis]?.[term];
+        if (v !== undefined) out[`pids.${axis}.${term}`] = v;
+      }
+    }
+    for (const k of PROFILE_SCOPED_ADVANCED_KEYS) {
+      const v = settings.advanced?.[k];
+      if (v !== undefined) out[`advanced.${k}`] = v;
     }
   } else {
-    for (const [k, v] of Object.entries(settings.rates ?? {})) if (v !== undefined) out[k] = v;
+    for (const [k, v] of Object.entries(settings.rates ?? {})) if (v !== undefined) out[`rates.${k}`] = v;
+  }
+  return out;
+}
+
+/** The header fingerprint flattened the same way as `comparable`. */
+function loggedValues(fp: AbFingerprint, kind: AbTestKind): Record<string, number | undefined> {
+  const out: Record<string, number | undefined> = {};
+  if (kind === "pid") {
+    for (const [k, v] of Object.entries(fp.filters)) out[`filters.${k}`] = v;
+    for (const axis of AXES) {
+      for (const term of ["p", "i", "d"] as const) out[`pids.${axis}.${term}`] = fp.pids[axis]?.[term];
+    }
+    for (const [k, v] of Object.entries(fp.advanced)) out[`advanced.${k}`] = v;
+  } else {
+    for (const [k, v] of Object.entries(fp.rates)) out[`rates.${k}`] = v;
   }
   return out;
 }
@@ -131,7 +190,7 @@ export function matchAbTest(headers: Record<string, string>, tests: readonly AbT
   const sorted = [...tests].sort((a, b) => b.createdAt - a.createdAt);
   for (const test of sorted) {
     if (test.variants.length !== 2) continue;
-    const logged = (test.kind === "pid" ? fp.filters : fp.rates) as Record<string, number | undefined>;
+    const logged = loggedValues(fp, test.kind);
     const [a, b] = test.variants.map((v) => comparable(v.settings, test.kind)) as [Record<string, number>, Record<string, number>];
     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
     const differing = [...keys].filter((k) => a[k] !== b[k] && logged[k] !== undefined);

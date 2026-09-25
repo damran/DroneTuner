@@ -35,7 +35,10 @@ RUN pnpm typecheck && pnpm test && pnpm -C client build
 FROM node:20-bookworm-slim AS runtime
 WORKDIR /app
 
-RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+# No pnpm at runtime: corepack caches the pnpm it prepares under the building user's
+# home (/root), so under `USER node` every container start would try to download pnpm
+# again and, offline or behind a proxy, fail before the server ever listened.
+# The server runs straight from node with the tsx loader instead.
 
 ENV NODE_ENV=production \
   HOST=0.0.0.0 \
@@ -56,5 +59,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3001)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 # Seed is idempotent: it skips tables that already contain rows.
-# `exec` makes the server PID 1's child so `docker stop` (SIGTERM) shuts it down gracefully.
-CMD ["sh", "-c", "pnpm -C server seed && exec pnpm -C server start"]
+# `exec` replaces the shell with node so `docker stop` (SIGTERM) reaches the server directly.
+WORKDIR /app/server
+CMD ["sh", "-c", "node --import tsx src/seed/index.ts && exec node --import tsx src/index.ts"]

@@ -116,6 +116,8 @@ docker run -d --name dronetuner \
 > [!NOTE]
 > Open the app via `http://localhost:3001` — WebSerial (the FC connection) is only available in secure contexts, and `localhost` qualifies. A LAN IP over plain HTTP will load the UI but the Connect button won't work.
 
+If the page doesn't open, check that the container is running and read its log. `docker compose ps` should show `dronetuner` as `Up (healthy)`, and `docker compose logs app` should end with `DroneTuner server listening on http://0.0.0.0:3001`. Compose publishes the port on `127.0.0.1` only, so open it from the machine running Docker (edit `ports:` in `docker-compose.yml` to expose it to your LAN).
+
 ### Run from source (development)
 
 **Prerequisites:** Node.js 20+, pnpm 9+, Chrome/Edge for the FC connection.
